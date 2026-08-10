@@ -560,15 +560,17 @@ select {
   -webkit-overflow-scrolling: touch;
   overscroll-behavior: contain;
   -webkit-app-region: no-drag;
-  overflow-anchor: auto;
+  /* zero auto-scroll „przelotu” przez historię */
+  overflow-anchor: none;
+  scroll-behavior: auto;
 }
 
 .messages {
   overflow-anchor: none;
 }
 
-.messages > .msg:last-child {
-  overflow-anchor: auto;
+.msg {
+  overflow-anchor: none;
 }
 
 .home-hero {
@@ -1279,12 +1281,70 @@ select {
 
 .queued-badge {
   display: inline-block;
-  margin-top: 6px;
   font-size: 11px;
   color: #c4b5fd;
   border: 1px solid rgba(139, 92, 246, 0.35);
   border-radius: 999px;
   padding: 2px 8px;
+}
+
+.queued-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.queued-inject {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f5f5f4;
+  background: rgba(192, 122, 90, 0.35);
+  border: 1px solid rgba(192, 122, 90, 0.55);
+  border-radius: 999px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.queued-inject:hover {
+  background: rgba(192, 122, 90, 0.55);
+}
+
+.chip.mode-auto {
+  background: rgba(234, 179, 8, 0.18);
+  color: #fbbf24;
+  border: 1px solid rgba(234, 179, 8, 0.4);
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.chip.mode-auto:hover {
+  background: rgba(234, 179, 8, 0.28);
+}
+
+.session-item.unread .title {
+  font-weight: 700;
+}
+
+.session-item .unread-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #60a5fa;
+  flex-shrink: 0;
+}
+
+.session-item .session-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.session-item .pin-mark {
+  font-size: 11px;
+  opacity: 0.85;
 }
 
 .chip.hidden {

@@ -25,6 +25,7 @@ const {
   formatAttachmentsForPrompt,
 } = require("./attachments");
 const { getUsage } = require("./usage");
+const sessionFlags = require("./session-flags");
 
 const execFileAsync = promisify(execFile);
 
@@ -450,15 +451,8 @@ async function sendCodeChat({ text, sessionId, cwd, attachments }) {
 
   const promptText = String(text || "") + formatAttachmentsForPrompt(attachments);
 
-  // Do UI tylko czysty tekst (bez dumpa ścieżek załączników)
-  send("chat:update", {
-    sessionId: sid,
-    update: {
-      sessionUpdate: "user_message_chunk",
-      content: { type: "text", text: String(text || "") },
-    },
-    _local: true,
-  });
+  // NIE wysyłaj user_message_chunk do UI — renderer już dodał bańkę lokalnie.
+  // Echo stąd + echo z ACP = podwójna wiadomość i skok scrolla.
 
   status("thinking", "Agent pracuje…");
   // Do agenta: tekst + ścieżki załączników
@@ -489,6 +483,20 @@ function registerIpc() {
     } catch (err) {
       return { ok: false, error: err.message };
     }
+  });
+
+  ipcMain.handle("session-flags:get-all", async () => {
+    return { ok: true, flags: sessionFlags.loadFlags(userDataDir()) };
+  });
+
+  ipcMain.handle("session-flags:set", async (_e, payload) => {
+    const { id, unread, pinned } = payload || {};
+    if (!id) return { ok: false, error: "no id" };
+    const partial = {};
+    if (typeof unread === "boolean") partial.unread = unread;
+    if (typeof pinned === "boolean") partial.pinned = pinned;
+    const flag = sessionFlags.setFlag(userDataDir(), id, partial);
+    return { ok: true, flag };
   });
 
   ipcMain.handle("settings:get", async () => getSettings());

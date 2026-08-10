@@ -137,15 +137,19 @@
             </div>
             <div class="composer-bottom">
               <div class="composer-left">
+                <button type="button" id="perm-mode-btn" class="chip mode-auto" title="Tryb uprawnień narzędzi (jak Auto w Claude). Ta apka: zawsze zatwierdzaj.">
+                  Auto
+                </button>
                 <span id="busy-chip" class="chip busy hidden">Working…</span>
                 <span id="cwd-chip" class="chip path">Home chat</span>
               </div>
               <div class="composer-right">
-                <label class="model-pill" id="effort-wrap" title="Effort (Build)">
+                <label class="model-pill" id="effort-wrap" title="Głębokość myślenia (reasoning effort)">
                   <select id="effort-select">
-                    <option value="low">Effort · low</option>
-                    <option value="medium">Effort · med</option>
-                    <option value="high" selected>Effort · high</option>
+                    <option value="low">Low</option>
+                    <option value="medium">Med</option>
+                    <option value="high" selected>High</option>
+                    <option value="xhigh">xHigh</option>
                   </select>
                 </label>
                 <label class="model-pill">
@@ -208,14 +212,12 @@
     <div id="ctx-menu" class="ctx-menu hidden">
       <button type="button" data-act="new">New chat</button>
       <button type="button" data-act="rename">Rename</button>
+      <button type="button" data-act="unread">Mark unread</button>
+      <button type="button" data-act="read">Mark read</button>
+      <button type="button" data-act="pin">Pin / Unpin</button>
       <button type="button" data-act="copy">Copy session ID</button>
       <button type="button" data-act="reveal">Show in Finder</button>
       <div class="ctx-sep"></div>
-      <button type="button" data-act="theme-dark">Theme · Dark</button>
-      <button type="button" data-act="theme-light">Theme · Light</button>
-      <button type="button" data-act="theme-auto">Theme · Auto</button>
-      <div class="ctx-sep"></div>
-      <button type="button" data-act="settings">Settings</button>
       <button type="button" data-act="delete" class="danger">Delete chat</button>
     </div>
 

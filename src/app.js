@@ -27,6 +27,8 @@
   let effortLevel = "high";
   /** Session ID where agent is currently working (only that row shows „pracuje”) */
   let busySessionId = null;
+  /** { [sessionId]: { unread, pinned } } */
+  let sessionFlagMap = {};
 
   /** Osobny stan UI dla Home i Code — zero mieszania. */
   function emptyBag() {
@@ -424,8 +426,19 @@
   }
 
   function filteredRows() {
+    let list = rowsForMode().slice();
+    list.sort((a, b) => {
+      const fa = sessionFlagMap[a.id] || {};
+      const fb = sessionFlagMap[b.id] || {};
+      const pa = fa.pinned ? 1 : 0;
+      const pb = fb.pinned ? 1 : 0;
+      if (pb !== pa) return pb - pa;
+      const ua = fa.unread ? 1 : 0;
+      const ub = fb.unread ? 1 : 0;
+      if (ub !== ua) return ub - ua;
+      return 0;
+    });
     const q = filter.trim().toLowerCase();
-    const list = rowsForMode();
     if (!q) return list;
     return list.filter(
       (r) =>
@@ -433,6 +446,15 @@
         (r.id || "").toLowerCase().includes(q) ||
         (r.cwd || "").toLowerCase().includes(q)
     );
+  }
+
+  async function markSessionFlag(id, partial) {
+    if (!id || typeof api.setSessionFlag !== "function") return;
+    const res = await api.setSessionFlag({ id, ...partial });
+    if (res && res.ok) {
+      sessionFlagMap[id] = { ...(sessionFlagMap[id] || {}), ...res.flag };
+      renderList();
+    }
   }
 
   function renderList() {
@@ -464,22 +486,29 @@
         const isWorking =
           mode === "grok" && busySessionId && r.id === busySessionId;
         const isTerminalLive = Boolean(r.isActive) && !isWorking;
+        const fl = sessionFlagMap[r.id] || {};
         li.className =
           "session-item" +
           (r.id === selectedId || r.id === liveSessionId ? " selected" : "") +
-          (isWorking ? " working" : "");
+          (isWorking ? " working" : "") +
+          (fl.unread ? " unread" : "") +
+          (fl.pinned ? " pinned" : "");
         li.innerHTML = `
           <div style="min-width:0">
             <div class="title"></div>
             <div class="meta"></div>
           </div>
-          ${
-            isWorking
-              ? '<span class="live-dot working" title="Pracuje w tej sesji"></span>'
-              : isTerminalLive
-                ? '<span class="live-dot" title="Aktywna w terminalu"></span>'
-                : ""
-          }`;
+          <div class="session-badges">
+            ${fl.pinned ? '<span class="pin-mark" title="Pinned">📌</span>' : ""}
+            ${fl.unread ? '<span class="unread-dot" title="Unread"></span>' : ""}
+            ${
+              isWorking
+                ? '<span class="live-dot working" title="Pracuje w tej sesji"></span>'
+                : isTerminalLive
+                  ? '<span class="live-dot" title="Aktywna w terminalu"></span>'
+                  : ""
+            }
+          </div>`;
         li.querySelector(".title").textContent = r.title;
         li.querySelector(".meta").textContent = [
           mode === "home" ? "Home" : basenameCwd(r.cwd),
@@ -489,7 +518,11 @@
         ]
           .filter(Boolean)
           .join(" · ");
-        li.addEventListener("click", () => openSession(r));
+        li.addEventListener("click", () => {
+          // otwarcie = przeczytane
+          if (fl.unread) markSessionFlag(r.id, { unread: false });
+          openSession(r);
+        });
         li.addEventListener("contextmenu", (e) => {
           e.preventDefault();
           showCtx(e.clientX, e.clientY, r.id);
@@ -566,13 +599,18 @@
     requestAnimationFrame(restore);
   }
 
+  function findLastAssistantRow() {
+    const nodes = el.messages.querySelectorAll(".msg.assistant");
+    return nodes[nodes.length - 1] || null;
+  }
+
   /** Aktualizuj ostatnią odpowiedź bez full re-render (bez skoku scrolla). */
   function patchLastAssistantBubble(m) {
     if (!m) return;
-    const stick = nearBottom();
-    let last = el.messages.lastElementChild;
-    if (!last || !last.classList.contains("assistant")) {
-      renderMessages({ forceScroll: stick });
+    let last = findLastAssistantRow();
+    if (!last) {
+      // NIGDY full renderMessages w trakcie tury — tylko doklej
+      appendMessageRows([m], { stick: true });
       return;
     }
     let content = last.querySelector(".msg-content");
@@ -593,15 +631,15 @@
     }
     const typing = last.querySelector(".typing");
     if (typing && safe) typing.remove();
-    if (stick || busy) scrollChatToBottom(true);
+    // tylko dociągnij dół jeśli już byliśmy na dole / busy — bez skoku „od góry”
+    if (busy || nearBottom(240)) scrollChatToBottom(true);
   }
 
   function patchThinking(m) {
     if (!m) return;
-    const stick = nearBottom();
-    let last = el.messages.lastElementChild;
-    if (!last || !last.classList.contains("assistant")) {
-      renderMessages({ forceScroll: stick });
+    let last = findLastAssistantRow();
+    if (!last) {
+      appendMessageRows([m], { stick: true });
       return;
     }
     let det = last.querySelector("details.thinking");
@@ -628,17 +666,191 @@
     if (stick) el.chatScroll.scrollTop = el.chatScroll.scrollHeight;
   }
 
+  /** Jedna bańka DOM — używane do full render i do append bez wipe. */
+  function buildMessageRow(m) {
+    const row = document.createElement("div");
+    row.className = `msg ${m.role}`;
+    if (m.id) row.dataset.msgId = m.id;
+    const av = document.createElement("div");
+    av.className = "msg-avatar";
+    av.textContent = m.role === "user" ? "Y" : "✦";
+    row.appendChild(av);
+
+    const body = document.createElement("div");
+    body.className = "msg-body";
+    const label = document.createElement("div");
+    label.className = "msg-label";
+    label.textContent = m.role === "user" ? "You" : "Grok";
+    body.appendChild(label);
+
+    if (m.thinking && mode === "grok") {
+      const pill = document.createElement("div");
+      pill.className =
+        "agent-work-summary" + (m._streaming && busy ? " live" : "");
+      pill.textContent =
+        m._streaming && busy ? "Thinking…" : "Thinking (ukryte w czacie)";
+      body.appendChild(pill);
+    }
+
+    if (mode === "grok" && m.tools && m.tools.length) {
+      const active = m.tools.filter(
+        (t) => t.status !== "completed" && t.status !== "failed"
+      );
+      const done = m.tools.filter(
+        (t) => t.status === "completed" || t.status === "failed"
+      );
+      const pill = document.createElement("div");
+      pill.className = "agent-work-summary" + (active.length ? " live" : "");
+      if (active.length) {
+        const ht = humanizeToolTitle(active[0].title);
+        pill.textContent = `Pracuję: ${ht}${
+          active.length > 1 ? ` +${active.length - 1}` : ""
+        }`;
+      } else {
+        pill.textContent = `${done.length} kroków w tle (ukryte) · patrz „Kroki”`;
+      }
+      body.appendChild(pill);
+    }
+
+    if (m.attachments && m.attachments.length) {
+      const wrap = document.createElement("div");
+      wrap.className = "msg-atts";
+      for (const a of m.attachments) {
+        const chip = document.createElement("span");
+        chip.className = "msg-att";
+        chip.textContent = a.name || a.path || "file";
+        wrap.appendChild(chip);
+      }
+      body.appendChild(wrap);
+    }
+
+    if (m.images && m.images.length) {
+      const gal = document.createElement("div");
+      gal.className = "msg-images";
+      for (const img of m.images) {
+        const im = document.createElement("img");
+        im.className = "msg-image";
+        if (img.b64) {
+          im.src = `data:${img.mimeType || "image/png"};base64,${img.b64}`;
+        } else if (img.path) {
+          im.alt = img.path;
+          api.readPreview(img.path).then((r) => {
+            if (r.ok) im.src = r.dataUrl;
+          });
+        }
+        gal.appendChild(im);
+      }
+      body.appendChild(gal);
+    }
+
+    const displayText =
+      m.role === "user"
+        ? cleanUserText(m.text)
+        : cleanAssistantText(m.text || "");
+    if (displayText) {
+      const content = document.createElement("div");
+      content.className = "msg-content";
+      if (m.role === "assistant" && typeof renderMarkdown === "function") {
+        content.innerHTML = renderMarkdown(displayText);
+      } else {
+        content.textContent = displayText;
+      }
+      body.appendChild(content);
+    }
+    if (m._queued) {
+      const q = document.createElement("div");
+      q.className = "queued-actions";
+      const badge = document.createElement("span");
+      badge.className = "queued-badge";
+      badge.textContent = "w kolejce";
+      const inject = document.createElement("button");
+      inject.type = "button";
+      inject.className = "queued-inject";
+      inject.title = "Wyślij teraz — przerwij i dołącz do bieżącej roboty (↩)";
+      inject.textContent = "↩ Wyślij teraz";
+      inject.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        injectQueuedNow(m);
+      };
+      q.appendChild(badge);
+      q.appendChild(inject);
+      body.appendChild(q);
+    }
+    // JEDEN indicator „…” (wcześniej było podwójne)
+    if (
+      m.role === "assistant" &&
+      m._streaming &&
+      !displayText &&
+      !(m.tools && m.tools.length)
+    ) {
+      const wait = document.createElement("div");
+      wait.className = "typing";
+      wait.textContent = "…";
+      body.appendChild(wait);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "msg-actions";
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.textContent = "Copy";
+    copyBtn.onclick = async () => {
+      try {
+        const clean =
+          m.role === "user"
+            ? cleanUserText(m.text || "")
+            : cleanAssistantText(m.text || "");
+        await navigator.clipboard.writeText(clean || m.text || "");
+        showToast("Copied", "ok");
+      } catch {
+        showToast("Copy failed", "error");
+      }
+    };
+    actions.appendChild(copyBtn);
+    body.appendChild(actions);
+    row.appendChild(body);
+    return row;
+  }
+
+  /** Doklej bańki na koniec — BEZ wipe historii (Enter nie skacze). */
+  function appendMessageRows(msgs, { stick = true } = {}) {
+    if (!msgs || !msgs.length) return;
+    el.homeHero.classList.add("hidden");
+    for (const m of msgs) {
+      // nie doklejaj drugiego usera z tym samym tekstem
+      if (m.role === "user" && hasUserTextAlready(m.text) && !m._local) continue;
+      if (m.role === "user" && m._local) {
+        // jeśli w DOM już jest ten tekst — nie dokładaj
+        const exists = [...el.messages.querySelectorAll(".msg.user .msg-content")].some(
+          (n) => normUserText(n.textContent) === normUserText(m.text)
+        );
+        if (exists) continue;
+      }
+      el.messages.appendChild(buildMessageRow(m));
+    }
+    dedupeTrailingUserMessages();
+    if (stick || busy || shouldStickBottom(true)) {
+      scrollChatToBottom(true);
+      requestAnimationFrame(() => scrollChatToBottom(true));
+    }
+  }
+
   function renderMessages(opts = {}) {
+    // W trakcie tury NIE przebudowuj całego czatu — to właśnie skakanie.
+    if (busy && !opts.force && !opts.forceScroll) {
+      if (streamingAssistant) patchLastAssistantBubble(streamingAssistant);
+      return;
+    }
     const forceScroll = Boolean(opts.forceScroll);
     const box = el.chatScroll;
     const prevTop = box ? box.scrollTop : 0;
-    // busy = zawsze dół (bez animowanego skoku przez całą historię)
     const stickBottom = shouldStickBottom(forceScroll);
 
-    // Blokuj scroll podczas wipe — inaczej widać „od startu do końca”
+    // Snapshot pozycji → podmiana w ukryciu → restore (brak klatki ze scrollem=0)
     if (box) {
-      box.style.overflowAnchor = "none";
-      box.style.scrollBehavior = "auto";
+      box.style.visibility = "hidden";
+      box.style.pointerEvents = "none";
     }
 
     const frag = document.createDocumentFragment();
@@ -653,167 +865,27 @@
       more.onclick = () => {
         visibleCount = Math.min(allMessages.length, visibleCount + PAGE);
         syncVisibleMessages();
-        renderMessages();
+        renderMessages({ forceScroll: false, force: true });
       };
       frag.appendChild(more);
     }
 
     for (const m of messages) {
-      const row = document.createElement("div");
-      row.className = `msg ${m.role}`;
-      const av = document.createElement("div");
-      av.className = "msg-avatar";
-      av.textContent = m.role === "user" ? "Y" : "✦";
-      row.appendChild(av);
-
-      const body = document.createElement("div");
-      body.className = "msg-body";
-      const label = document.createElement("div");
-      label.className = "msg-label";
-      label.textContent = m.role === "user" ? "You" : "Grok";
-      body.appendChild(label);
-
-      // Thinking — zwinięte, bez pełnego tekstu w czacie (robotę widać w „Kroki”)
-      if (m.thinking && mode === "grok") {
-        const pill = document.createElement("div");
-        pill.className =
-          "agent-work-summary" + (m._streaming && busy ? " live" : "");
-        pill.textContent =
-          m._streaming && busy ? "Thinking…" : "Thinking (ukryte w czacie)";
-        body.appendChild(pill);
-      }
-
-      // Tools — NIE pokazuj dumpów bash/kodu w czacie. Tylko skrót.
-      if (mode === "grok" && m.tools && m.tools.length) {
-        const active = m.tools.filter(
-          (t) => t.status !== "completed" && t.status !== "failed"
-        );
-        const done = m.tools.filter(
-          (t) => t.status === "completed" || t.status === "failed"
-        );
-        const pill = document.createElement("div");
-        pill.className =
-          "agent-work-summary" + (active.length ? " live" : "");
-        if (active.length) {
-          const ht = humanizeToolTitle(active[0].title);
-          pill.textContent = `Pracuję: ${ht}${
-            active.length > 1 ? ` +${active.length - 1}` : ""
-          }`;
-        } else {
-          pill.textContent = `${done.length} kroków w tle (ukryte) · patrz „Kroki”`;
-        }
-        body.appendChild(pill);
-      }
-
-      if (m.attachments && m.attachments.length) {
-        const wrap = document.createElement("div");
-        wrap.className = "msg-atts";
-        for (const a of m.attachments) {
-          const chip = document.createElement("span");
-          chip.className = "msg-att";
-          chip.textContent = a.name || a.path || "file";
-          wrap.appendChild(chip);
-        }
-        body.appendChild(wrap);
-      }
-
-      if (m.images && m.images.length) {
-        const gal = document.createElement("div");
-        gal.className = "msg-images";
-        for (const img of m.images) {
-          const im = document.createElement("img");
-          im.className = "msg-image";
-          if (img.b64) {
-            im.src = `data:${img.mimeType || "image/png"};base64,${img.b64}`;
-          } else if (img.path) {
-            im.alt = img.path;
-            api.readPreview(img.path).then((r) => {
-              if (r.ok) im.src = r.dataUrl;
-            });
-          }
-          gal.appendChild(im);
-        }
-        body.appendChild(gal);
-      }
-
-      let displayText =
-        m.role === "user"
-          ? cleanUserText(m.text)
-          : cleanAssistantText(m.text || "");
-      // Puste bańki / sam załącznik bez tekstu — nie doklejaj pustego contentu
-      if (displayText) {
-        const content = document.createElement("div");
-        content.className = "msg-content";
-        if (m.role === "assistant" && typeof renderMarkdown === "function") {
-          content.innerHTML = renderMarkdown(displayText);
-        } else {
-          content.textContent = displayText;
-        }
-        body.appendChild(content);
-      } else if (
-        m.role === "assistant" &&
-        m._streaming &&
-        busy &&
-        !(m.tools && m.tools.length) &&
-        !m.thinking
-      ) {
-        const wait = document.createElement("div");
-        wait.className = "typing";
-        wait.textContent = "…";
-        body.appendChild(wait);
-      }
-      if (m._queued) {
-        const q = document.createElement("div");
-        q.className = "queued-badge";
-        q.textContent = "w kolejce";
-        body.appendChild(q);
-      }
-
-      if (m._streaming && busy && !m.text && !m.thinking) {
-        const wait = document.createElement("div");
-        wait.className = "typing";
-        wait.textContent = "…";
-        body.appendChild(wait);
-      }
-
-      const actions = document.createElement("div");
-      actions.className = "msg-actions";
-      const copyBtn = document.createElement("button");
-      copyBtn.type = "button";
-      copyBtn.textContent = "Copy";
-      copyBtn.onclick = async () => {
-        try {
-          const clean =
-            m.role === "user"
-              ? cleanUserText(m.text || "")
-              : cleanAssistantText(m.text || "");
-          await navigator.clipboard.writeText(clean || m.text || "");
-          showToast("Copied", "ok");
-        } catch {
-          showToast("Copy failed", "error");
-        }
-      };
-      actions.appendChild(copyBtn);
-      body.appendChild(actions);
-
-      row.appendChild(body);
-      frag.appendChild(row);
+      frag.appendChild(buildMessageRow(m));
     }
 
-    // Atomowa podmiana — scroll ustawiony w tym samym ticku, zanim przeglądarka namaluje 0
     el.messages.replaceChildren(frag);
     if (box) {
-      if (stickBottom) {
-        box.scrollTop = box.scrollHeight;
-      } else {
-        box.scrollTop = prevTop;
-      }
+      box.scrollTop = stickBottom ? box.scrollHeight : prevTop;
+      // force reflow before show
+      void box.offsetHeight;
+      box.style.visibility = "";
+      box.style.pointerEvents = "";
     }
-    // drugi pass po layout (obrazy / fonty)
     requestAnimationFrame(() => {
       if (!el.chatScroll) return;
       if (stickBottom || busy) scrollChatToBottom(true);
-      else if (prevTop > 0) el.chatScroll.scrollTop = prevTop;
+      else el.chatScroll.scrollTop = prevTop;
     });
   }
 
@@ -1088,6 +1160,14 @@
 
   function ensureStreamingAssistant() {
     if (streamingAssistant) return streamingAssistant;
+    // reuse empty streaming shell already in history (po Enter)
+    for (let i = allMessages.length - 1; i >= 0; i--) {
+      const m = allMessages[i];
+      if (m.role === "assistant" && m._streaming) {
+        streamingAssistant = m;
+        return m;
+      }
+    }
     streamingAssistant = {
       id: `stream-${Date.now()}`,
       role: "assistant",
@@ -1097,11 +1177,79 @@
       _streaming: true,
     };
     pushAll(streamingAssistant);
+    // tylko jeśli nie ma w DOM
+    const last = el.messages.lastElementChild;
+    if (!last || !last.classList.contains("assistant")) {
+      appendMessageRows([streamingAssistant], { stick: true });
+    }
     return streamingAssistant;
   }
 
+  /** Normalizacja do porównań echa (spacje / załączniki). */
+  function normUserText(t) {
+    return cleanUserText(t || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
+
+  /** Czy ten tekst usera już jest w czacie (ostatnie N wiadomości usera). */
+  function hasUserTextAlready(t) {
+    const want = normUserText(t);
+    if (!want) return true;
+    let seen = 0;
+    for (let i = allMessages.length - 1; i >= 0 && seen < 8; i--) {
+      const m = allMessages[i];
+      if (m.role !== "user") continue;
+      seen++;
+      const got = normUserText(m.text);
+      if (!got) continue;
+      if (got === want || want.startsWith(got) || got.startsWith(want)) return true;
+    }
+    return false;
+  }
+
+  /** Wyrzuć z modelu i DOM kolejne duplikaty tej samej user-wiadomości. */
+  function dedupeTrailingUserMessages() {
+    let lastUserNorm = null;
+    const removeIds = new Set();
+    for (let i = allMessages.length - 1; i >= 0; i--) {
+      const m = allMessages[i];
+      if (m.role !== "user") {
+        if (m.role === "assistant" && !m.text && !m.tools?.length) continue;
+        // po napotkaniu realnej odpowiedzi asystenta kończymy skan „ogona”
+        if (m.role === "assistant" && (m.text || m.tools?.length)) break;
+        continue;
+      }
+      const n = normUserText(m.text);
+      if (!n) continue;
+      if (lastUserNorm && (n === lastUserNorm || n.startsWith(lastUserNorm) || lastUserNorm.startsWith(n))) {
+        // starszy duplikat (idziemy od końca — zostaw najnowszy, skasuj wcześniejszy przy drugim trafieniu)
+        // przy skanie od końca: first hit = keep, second same = remove this older one
+        removeIds.add(m.id);
+        continue;
+      }
+      lastUserNorm = n;
+    }
+    if (!removeIds.size) return;
+    allMessages = allMessages.filter((m) => !removeIds.has(m.id));
+    syncVisibleMessages();
+    // DOM: usuń user rows z tym samym tekstem (zostaw pierwszą od góry / ostatnią w DOM)
+    const userRows = [...el.messages.querySelectorAll(".msg.user")];
+    const seen = new Set();
+    // idź od końca — zostaw ostatnią, usuń wcześniejsze z tym samym norm tekstem
+    for (let i = userRows.length - 1; i >= 0; i--) {
+      const row = userRows[i];
+      const txt = normUserText(row.querySelector(".msg-content")?.textContent || "");
+      if (!txt) continue;
+      if (seen.has(txt)) row.remove();
+      else seen.add(txt);
+    }
+    bag().allMessages = allMessages;
+  }
+
   function handleChatUpdate(params) {
-    // ACP stream dotyczy TYLKO Code. Jeśli jesteśmy w Home — zaktualizuj worek Code w tle, nie ruszaj UI Home.
+    // ACP stream dotyczy TYLKO Build. Jeśli jesteśmy w Home — zaktualizuj worek Build w tle.
     if (mode === "home") {
       applyCodeStreamInBackground(params);
       return;
@@ -1111,22 +1259,17 @@
     if (!kind) return;
 
     if (kind === "user_message_chunk") {
-      // Ignoruj echo promptu z załącznikami — UI ma już czysty bubble.
+      // ZAWSZE ignoruj echo usera z ACP podczas/po naszej wysyłce.
+      // Bańkę dodaje wyłącznie runSendTurn / kolejka.
+      if (params && params._local) return;
+      if (busy || streamingAssistant) return;
       const raw = (update.content && update.content.text) || "";
       if (isAttachmentJunkOnly(raw)) return;
       const t = cleanUserText(raw);
       if (!t) return;
-      const last = lastAll();
-      if (last && last.role === "user" && last._local) {
-        return;
-      }
-      if (last && last.role === "user" && (last.text === t || t.startsWith(last.text))) {
-        last.text = t.length > (last.text || "").length ? t : last.text;
-      } else {
-        pushAll({ id: `u-${Date.now()}`, role: "user", text: t, tools: [] });
-      }
-      streamingAssistant = null;
-      renderMessages();
+      if (hasUserTextAlready(t)) return;
+      // twarda bramka: w tej apce nie przyjmujemy user echa z ACP wcale
+      // (historia ładuje się z transcript, nie ze streamu live)
       return;
     }
 
@@ -1607,15 +1750,61 @@
       updateQueueChip();
       setStatus(
         "queued",
-        messageQueue.length === 1
-          ? "W kolejce — wyślę jednym strzałem po tej odpowiedzi"
-          : `W kolejce (${messageQueue.length}) — scalę przed wysyłką`
+        "W kolejce — kliknij ↩ Wyślij teraz, albo poczekaj na koniec tury"
       );
       el.input.focus();
       return;
     }
 
     await runSendTurn(text || "(załącznik)", atts, prefill == null);
+  }
+
+  /**
+   * ↩ na bańce w kolejce: przerwij bieżącą robotę i wyślij to TERAZ
+   * (włączone w kontekst agenta — nie czekaj na „Gotowe”).
+   */
+  async function injectQueuedNow(msg) {
+    const text = cleanUserText(msg?.text || "");
+    const atts = (msg && msg.attachments) || [];
+    if (!text && !atts.length) return;
+
+    // zdejmij z kolejki (całość scaloną albo tę jedną)
+    if (messageQueue.length) {
+      // jeśli to scalona bańka — opróżnij całą kolejkę (treść jest w msg)
+      messageQueue = [];
+    }
+    // odznacz bańki „w kolejce”
+    for (const m of allMessages) {
+      if (m._queued) m._queued = false;
+    }
+    updateQueueChip();
+
+    // stop bieżącej tury
+    try {
+      await api.chatStop();
+    } catch {
+      /* ignore */
+    }
+    setBusy(false);
+    busySessionId = null;
+    if (streamingAssistant) streamingAssistant._streaming = false;
+    streamingAssistant = null;
+
+    // prześlij jako nową turę z dopiskiem „kontynuuj bieżące”
+    const payload =
+      (text || "(załącznik)") +
+      "\n\n[Wstrzyknieto w trakcie pracy — włącz to w bieżące zadanie, nie zaczynaj od zera.]";
+
+    // odśwież UI bańki (bez badge kolejki)
+    const rows = el.messages.querySelectorAll(".msg.user");
+    const lastUser = rows[rows.length - 1];
+    if (lastUser) {
+      lastUser.querySelector(".queued-actions")?.remove();
+      lastUser.querySelector(".queued-badge")?.remove();
+    }
+
+    showToast("Wysyłam teraz (przerwano bieżącą turę)", "ok");
+    await runSendTurn(payload, atts, false);
   }
 
   async function runSendTurn(text, atts, clearInput) {
@@ -1629,18 +1818,21 @@
       last.role === "user" &&
       last._queued &&
       cleanUserText(last.text) === cleanUserText(text);
+    const toAppend = [];
     if (!alreadyShown) {
       const showText = text && text !== "(załącznik)" ? text : "";
-      // Nie twórz pustej bańki przy samym załączniku bez tekstu
       if (showText || (atts && atts.length)) {
-        pushAll({
+        const userMsg = {
           id: `u-local-${Date.now()}`,
           role: "user",
           text: showText,
           tools: [],
           attachments: atts || [],
           _local: true,
-        });
+          _ts: Date.now(),
+        };
+        pushAll(userMsg);
+        toAppend.push(userMsg);
       }
     } else if (last) {
       last._queued = false;
@@ -1655,17 +1847,25 @@
       _streaming: true,
     };
     pushAll(streamingAssistant);
+    toAppend.push(streamingAssistant);
     liveTools = [];
 
     if (clearInput) el.input.value = "";
     attachments = [];
     renderAttachChips();
     autosize();
-    renderMessages();
+    // Enter = tylko doklej bańki, NIE przebudowuj historii
+    if (toAppend.length) appendMessageRows(toAppend, { stick: true });
+    else scrollChatToBottom(true);
+    dedupeTrailingUserMessages();
     renderActivity();
     setBusy(true);
     setStatus("thinking", mode === "home" ? "Myślę…" : "Agent startuje…");
-    el.input.focus();
+    try {
+      el.input.focus({ preventScroll: true });
+    } catch {
+      el.input.focus();
+    }
 
     const res = await api.chatSend({
       text: text === "(załącznik)" ? "" : text,
@@ -1682,6 +1882,8 @@
       effort: mode === "grok" ? effortLevel : undefined,
     });
 
+    // posprzątaj echa które weszły mimo bramek
+    dedupeTrailingUserMessages();
     setBusy(false);
     if (!res.ok) {
       showToast(res.error || "Send failed", "error");
@@ -1701,16 +1903,25 @@
         streamingAssistant.text = res.assistant.content || "";
         streamingAssistant.images = res.assistant.images || [];
         streamingAssistant._streaming = false;
+        // podmień ostatnią bańkę asystenta bez wipe
+        const lastRow = el.messages.lastElementChild;
+        if (lastRow && lastRow.classList.contains("assistant")) {
+          lastRow.replaceWith(buildMessageRow(streamingAssistant));
+          scrollChatToBottom(true);
+        } else {
+          appendMessageRows([streamingAssistant], { stick: true });
+        }
       } else {
-        pushAll({
+        const msg = {
           id: res.assistant.id,
           role: "assistant",
           text: res.assistant.content || "",
           images: res.assistant.images || [],
           tools: [],
-        });
+        };
+        pushAll(msg);
+        appendMessageRows([msg], { stick: true });
       }
-      renderMessages();
     }
 
     if (res.title) {
@@ -1731,13 +1942,11 @@
       renderMessages({ forceScroll: true });
       return;
     }
-    const stick = shouldStickBottom(true);
-    let row = el.messages.lastElementChild;
-    // ostatni może być asystent streaming — szukaj user
     const rows = el.messages.querySelectorAll(".msg.user");
-    row = rows[rows.length - 1] || null;
+    let row = rows[rows.length - 1] || null;
     if (!row) {
-      renderMessages({ forceScroll: true });
+      // doklej bańkę z przyciskiem ↩
+      appendMessageRows([last], { stick: true });
       return;
     }
     let content = row.querySelector(".msg-content");
@@ -1750,7 +1959,30 @@
       }
       content.textContent = text;
     }
-    if (stick) scrollChatToBottom(true);
+    // upewnij się że jest ↩ Wyślij teraz
+    const body = row.querySelector(".msg-body");
+    if (body && !body.querySelector(".queued-inject")) {
+      body.querySelector(".queued-actions")?.remove();
+      const q = document.createElement("div");
+      q.className = "queued-actions";
+      const badge = document.createElement("span");
+      badge.className = "queued-badge";
+      badge.textContent = "w kolejce";
+      const inject = document.createElement("button");
+      inject.type = "button";
+      inject.className = "queued-inject";
+      inject.title = "Wyślij teraz — przerwij i dołącz do bieżącej roboty";
+      inject.textContent = "↩ Wyślij teraz";
+      inject.onclick = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        injectQueuedNow(last);
+      };
+      q.appendChild(badge);
+      q.appendChild(inject);
+      body.appendChild(q);
+    }
+    if (shouldStickBottom(true)) scrollChatToBottom(true);
   }
 
   /** Zlej całą kolejkę w jedną wiadomość (dopowiedzenia = jedna tura, nie N). */
@@ -1871,26 +2103,6 @@
       await newChat();
       return;
     }
-    if (act === "theme-dark") {
-      applyTheme("dark");
-      showToast("Theme: Dark", "ok");
-      return;
-    }
-    if (act === "theme-light") {
-      applyTheme("light");
-      showToast("Theme: Light", "ok");
-      return;
-    }
-    if (act === "theme-auto") {
-      applyTheme("auto");
-      showToast("Theme: Auto", "ok");
-      return;
-    }
-    if (act === "settings") {
-      document.getElementById("btn-settings").click();
-      return;
-    }
-
     if (!id) {
       showToast("Wybierz czat z listy (albo New chat)", "");
       return;
@@ -1904,6 +2116,22 @@
     if (act === "copy") {
       await navigator.clipboard.writeText(id);
       showToast("ID skopiowane", "ok");
+      return;
+    }
+    if (act === "unread") {
+      await markSessionFlag(id, { unread: true });
+      showToast("Unread", "ok");
+      return;
+    }
+    if (act === "read") {
+      await markSessionFlag(id, { unread: false });
+      showToast("Read", "ok");
+      return;
+    }
+    if (act === "pin") {
+      const cur = sessionFlagMap[id] || {};
+      await markSessionFlag(id, { pinned: !cur.pinned });
+      showToast(cur.pinned ? "Unpinned" : "Pinned", "ok");
       return;
     }
     if (act === "reveal") {
@@ -2202,6 +2430,19 @@
     const data = await api.list();
     applyPayload(data);
     if (data.settings?.theme) applyTheme(data.settings.theme);
+    if (data.settings?.effort) {
+      effortLevel = data.settings.effort;
+      const es = document.getElementById("effort-select");
+      if (es) es.value = effortLevel;
+    }
+    if (typeof api.getSessionFlags === "function") {
+      try {
+        const fr = await api.getSessionFlags();
+        if (fr && fr.ok) sessionFlagMap = fr.flags || {};
+      } catch {
+        /* ignore */
+      }
+    }
 
     const lastMode =
       data.settings?.lastMode === "grok" ? "grok" : "home";
@@ -2393,6 +2634,17 @@
     });
     usageTimer = setInterval(() => refreshUsage({ includeRate: false }), 15000);
     refreshUsage({ includeRate: true });
+  }
+
+  // Auto (permission mode) — jak w Claude, lewy dół
+  const permBtn = document.getElementById("perm-mode-btn");
+  if (permBtn) {
+    permBtn.onclick = () => {
+      showToast(
+        "Auto = narzędzia bez pytania (always-approve). Effort: Low/Med/High/xHigh po prawej.",
+        "ok"
+      );
+    };
   }
 
   boot().catch((err) => {

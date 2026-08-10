@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld("grokSessions", {
   readPreview: (p) => ipcRenderer.invoke("attachments:read-preview", p),
   getAccount: () => ipcRenderer.invoke("account:get"),
   getUsage: (payload) => ipcRenderer.invoke("usage:get", payload || {}),
+  getSessionFlags: () => ipcRenderer.invoke("session-flags:get-all"),
+  setSessionFlag: (payload) => ipcRenderer.invoke("session-flags:set", payload),
   onChatUpdate: (cb) => {
     const handler = (_e, data) => cb(data);
     ipcRenderer.on("chat:update", handler);
