@@ -68,28 +68,35 @@ function renderTable(block) {
   // skip separator rows |---|---|
   const isSep = (cells) => cells.every((c) => /^:?-+:?$/.test(c) || c === "");
 
-  let html = '<table class="md-table"><tbody>';
-  let headerDone = false;
+  const bodyRows = [];
+  let headerCells = null;
   for (const row of rows) {
     const cells = parseRow(row);
-    if (isSep(cells)) {
-      headerDone = true;
-      continue;
-    }
-    const tag = !headerDone && rows.indexOf(row) === 0 ? "th" : "td";
-    if (tag === "th") {
-      html =
-        '<table class="md-table"><thead><tr>' +
-        cells.map((c) => `<th>${inlineFormat(c)}</th>`).join("") +
-        "</tr></thead><tbody>";
-      headerDone = true;
-    } else {
-      html +=
-        "<tr>" + cells.map((c) => `<td>${inlineFormat(c)}</td>`).join("") + "</tr>";
-    }
+    if (isSep(cells)) continue;
+    if (!headerCells) headerCells = cells;
+    else bodyRows.push(cells);
   }
-  html += "</tbody></table>";
-  return html;
+  if (!headerCells) return null;
+  // single row → treat as body without header
+  if (!bodyRows.length) {
+    return (
+      '<table class="md-table"><tbody><tr>' +
+      headerCells.map((c) => `<td>${inlineFormat(c)}</td>`).join("") +
+      "</tr></tbody></table>"
+    );
+  }
+  return (
+    '<table class="md-table"><thead><tr>' +
+    headerCells.map((c) => `<th>${inlineFormat(c)}</th>`).join("") +
+    "</tr></thead><tbody>" +
+    bodyRows
+      .map(
+        (cells) =>
+          "<tr>" + cells.map((c) => `<td>${inlineFormat(c)}</td>`).join("") + "</tr>"
+      )
+      .join("") +
+    "</tbody></table>"
+  );
 }
 
 function inlineFormat(s) {
