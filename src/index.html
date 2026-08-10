@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="pl" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data: file: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grok</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="drop-overlay" class="drop-overlay hidden">
+      <div class="drop-card">Upuść pliki, foldery lub grafiki</div>
+    </div>
+
+    <div id="app">
+      <aside id="rail" class="rail">
+        <div class="rail-top drag">
+          <div class="brand-row no-drag">
+            <div class="brand-mark" aria-hidden="true">✦</div>
+            <span class="brand-word">Grok</span>
+            <button type="button" id="btn-collapse" class="icon-ghost" title="Zwiń">‹</button>
+          </div>
+          <div class="mode-tabs no-drag" role="tablist">
+            <button type="button" class="mode-tab active" data-mode="home" id="tab-home">Home</button>
+            <button type="button" class="mode-tab" data-mode="grok" id="tab-grok">Build</button>
+          </div>
+        </div>
+
+        <div class="rail-tools no-drag">
+          <button type="button" id="btn-new" class="btn-new">
+            <span class="ico">✎</span>
+            <span id="btn-new-label">New chat</span>
+          </button>
+          <div class="search-wrap">
+            <span class="search-ico">⌕</span>
+            <input type="search" id="filter" placeholder="Search" autocomplete="off" spellcheck="false" />
+          </div>
+        </div>
+
+        <div id="banner" class="banner hidden no-drag"></div>
+
+        <div class="rail-scroll no-drag">
+          <div class="rail-section-label" id="recents-label">Recents · Home</div>
+          <ul id="session-list" class="session-list"></ul>
+        </div>
+
+        <footer class="rail-footer no-drag">
+          <button type="button" id="btn-account" class="account-btn" title="Konto">
+            <span class="avatar" id="account-avatar">R</span>
+            <span class="account-meta">
+              <span class="account-name" id="account-name">—</span>
+              <span class="account-sub" id="account-sub">konto</span>
+            </span>
+          </button>
+          <button type="button" id="btn-settings" class="icon-ghost" title="Ustawienia">⚙</button>
+        </footer>
+      </aside>
+
+      <section class="workspace">
+        <header class="ws-header drag">
+          <div class="ws-header-left no-drag">
+            <button type="button" id="btn-expand" class="icon-ghost expand-in-header hidden" title="Pokaż listę sesji">›</button>
+            <div class="ws-path" id="ws-path">
+              <span id="ws-mode-badge" class="mode-badge">Home</span>
+              <span id="ws-cwd">chat</span>
+            </div>
+            <h1 id="ws-title" class="ws-title">New chat</h1>
+          </div>
+          <div class="ws-header-right no-drag">
+            <button type="button" id="btn-session-menu" class="icon-ghost" title="Menu">⋯</button>
+          </div>
+        </header>
+
+        <div id="chat-scroll" class="chat-scroll">
+          <div id="home-hero" class="home-hero">
+            <div class="hero-logo">✦</div>
+            <h2 id="hero-title">How can I help you today?</h2>
+            <p class="hero-sub" id="hero-sub">
+              Home = czat jak w przeglądarce Grok (tekst + grafiki). Przeciągnij pliki albo wklej screenshot.
+            </p>
+            <div class="suggestions" id="suggestions">
+              <button type="button" class="suggest" data-text="Wygeneruj grafikę: minimalistyczne logo marki Sosky, ciemne tło, clay accent">
+                🎨 Wygeneruj grafikę
+              </button>
+              <button type="button" class="suggest" data-text="Wytłumacz prosto, czym różni się funnel od lejka sprzedażowego">
+                💬 Pytanie jak w przeglądarce
+              </button>
+              <button type="button" class="suggest" data-text="/image flat illustration of a Polish entrepreneur looking at Meta Ads dashboard">
+                🖼️ /image …
+              </button>
+              <button type="button" class="suggest" data-text="Zrób plan treści na 7 dni pod Meta Ads dla ekspertów">
+                📋 Plan treści
+              </button>
+            </div>
+          </div>
+          <div id="messages" class="messages"></div>
+        </div>
+
+        <div class="composer-dock no-drag">
+          <div id="status-bar" class="status-bar hidden">
+            <span class="status-dot busy"></span>
+            <span id="status-text">Working…</span>
+            <button type="button" id="btn-toggle-activity" class="linkish hidden">Pokaż kroki</button>
+          </div>
+          <div id="activity-panel" class="activity-panel hidden"></div>
+          <div id="toast" class="toast hidden"></div>
+          <div id="attach-chips" class="attach-chips hidden"></div>
+          <form id="composer" class="composer no-drag">
+            <div class="composer-top">
+              <button type="button" class="icon-ghost attach" id="btn-attach" title="Dodaj plik / folder">＋</button>
+              <textarea
+                id="input"
+                rows="1"
+                placeholder="Message Grok… (Enter = send, ⌘V = wklej screenshot)"
+                autocomplete="off"
+                spellcheck="true"
+              ></textarea>
+            </div>
+            <div id="home-media-bar" class="home-media-bar">
+              <div class="seg" id="home-kind" role="tablist">
+                <button type="button" class="seg-btn active" data-kind="chat">Chat</button>
+                <button type="button" class="seg-btn" data-kind="image">Image</button>
+                <button type="button" class="seg-btn" data-kind="video">Video</button>
+              </div>
+              <label class="model-pill hidden" id="ratio-wrap">
+                <select id="ratio-select" title="Proporcje">
+                  <option value="1:1">1:1</option>
+                  <option value="16:9">16:9</option>
+                  <option value="9:16">9:16</option>
+                  <option value="4:3">4:3</option>
+                  <option value="3:2">3:2</option>
+                </select>
+              </label>
+            </div>
+            <div class="composer-bottom">
+              <div class="composer-left">
+                <span id="busy-chip" class="chip busy hidden">Working…</span>
+                <span id="cwd-chip" class="chip path">Home chat</span>
+              </div>
+              <div class="composer-right">
+                <label class="model-pill" id="effort-wrap" title="Effort (Build)">
+                  <select id="effort-select">
+                    <option value="low">Effort · low</option>
+                    <option value="medium">Effort · med</option>
+                    <option value="high" selected>Effort · high</option>
+                  </select>
+                </label>
+                <label class="model-pill">
+                  <select id="model-select" title="Model"></select>
+                </label>
+                <button type="button" id="btn-stop" class="btn-stop hidden" title="Stop">■</button>
+                <button type="submit" id="btn-send" class="btn-send" title="Send">↑</button>
+              </div>
+            </div>
+          </form>
+          <p class="fine-print" id="fine-print">Home · czat i grafiki · przeciągnij pliki tutaj</p>
+          <div class="usage-corner no-drag">
+            <button type="button" id="btn-usage" class="usage-btn" title="Zużycie kontekstu i limity">
+              <span id="usage-btn-pct">—</span>
+              <span class="usage-btn-ring" id="usage-btn-ring" aria-hidden="true"></span>
+            </button>
+            <div id="usage-popover" class="usage-popover hidden" role="dialog" aria-label="Usage">
+              <div class="usage-pop-head">Zużycie</div>
+              <div class="usage-row">
+                <span class="usage-label" id="usage-weekly-label">Tygodniowy limit SuperGrok</span>
+                <span class="usage-meta" id="usage-weekly-meta">—</span>
+              </div>
+              <div class="usage-bar-track"><div class="usage-bar-fill weekly" id="usage-weekly-bar"></div></div>
+              <div class="usage-row subtle">
+                <span id="usage-weekly-detail">—</span>
+              </div>
+              <div class="usage-sep"></div>
+              <div class="usage-row">
+                <span class="usage-label">Context window (sesja)</span>
+                <span class="usage-meta" id="usage-ctx-meta">—</span>
+              </div>
+              <div class="usage-bar-track"><div class="usage-bar-fill" id="usage-ctx-bar"></div></div>
+              <div class="usage-row subtle">
+                <span id="usage-ctx-tokens">—</span>
+              </div>
+              <div class="usage-sep"></div>
+              <div class="usage-row">
+                <span class="usage-label">API rate limit</span>
+                <span class="usage-meta" id="usage-rate-meta">—</span>
+              </div>
+              <div class="usage-bar-track"><div class="usage-bar-fill rate" id="usage-rate-bar"></div></div>
+              <div class="usage-row subtle">
+                <span id="usage-req-meta">—</span>
+              </div>
+              <div class="usage-sep"></div>
+              <div class="usage-row">
+                <span class="usage-label">Terminal</span>
+                <span class="usage-meta" id="usage-term-meta">—</span>
+              </div>
+              <div class="usage-row subtle">
+                <span id="usage-session-meta">—</span>
+              </div>
+              <div class="usage-foot" id="usage-account">—</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="ctx-menu" class="ctx-menu hidden">
+      <button type="button" data-act="new">New chat</button>
+      <button type="button" data-act="rename">Rename</button>
+      <button type="button" data-act="copy">Copy session ID</button>
+      <button type="button" data-act="reveal">Show in Finder</button>
+      <div class="ctx-sep"></div>
+      <button type="button" data-act="theme-dark">Theme · Dark</button>
+      <button type="button" data-act="theme-light">Theme · Light</button>
+      <button type="button" data-act="theme-auto">Theme · Auto</button>
+      <div class="ctx-sep"></div>
+      <button type="button" data-act="settings">Settings</button>
+      <button type="button" data-act="delete" class="danger">Delete chat</button>
+    </div>
+
+    <div id="modal" class="modal hidden" role="dialog">
+      <div class="modal-card">
+        <h2 id="modal-title">Confirm</h2>
+        <p id="modal-body"></p>
+        <input type="text" id="modal-input" class="input hidden" />
+        <div class="modal-actions">
+          <button type="button" id="modal-cancel" class="btn">Cancel</button>
+          <button type="button" id="modal-ok" class="btn primary">OK</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="account-modal" class="modal hidden" role="dialog">
+      <div class="modal-card">
+        <h2>Konto</h2>
+        <p id="account-detail" class="account-detail">—</p>
+        <div class="modal-actions">
+          <button type="button" id="account-login" class="btn">Log in (grok login)</button>
+          <button type="button" id="account-close" class="btn primary">Zamknij</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="settings-modal" class="modal hidden" role="dialog">
+      <div class="modal-card settings-card">
+        <h2>Settings</h2>
+        <label class="field">
+          <span>Path to grok binary</span>
+          <div class="row">
+            <input type="text" id="set-grok-path" class="input" />
+            <button type="button" id="set-pick-grok" class="btn">Browse…</button>
+          </div>
+        </label>
+        <label class="field">
+          <span>Default working directory (Build)</span>
+          <input type="text" id="set-cwd" class="input" />
+        </label>
+        <label class="field check">
+          <input type="checkbox" id="set-subagents" />
+          <span>Show subagents in Build Recents</span>
+        </label>
+        <div class="modal-actions">
+          <button type="button" id="set-login" class="btn">Log in</button>
+          <button type="button" id="set-cancel" class="btn">Cancel</button>
+          <button type="button" id="set-save" class="btn primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="./markdown.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

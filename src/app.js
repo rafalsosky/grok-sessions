@@ -1,0 +1,2403 @@
+/* global grokSessions, renderMarkdown */
+
+(() => {
+  const api = window.grokSessions;
+  if (!api) {
+    document.body.innerHTML =
+      "<p style='padding:24px;color:#fff'>Brak bridge API (preload).</p>";
+    return;
+  }
+
+  /** @type {'home'|'grok'} */
+  let mode = "home";
+  /** @type {any[]} */
+  let codeRows = [];
+  /** @type {any[]} */
+  let homeRows = [];
+  let filter = "";
+  let defaultCwd = "";
+  let homeModelId = "grok-4.5";
+  let codeModelId = "grok-4.5";
+  let ctxTargetId = null;
+  let drainingQueue = false;
+  const PAGE = 60;
+  let bootDone = false;
+  /** Home: chat | image | video */
+  let homeKind = "chat";
+  let effortLevel = "high";
+  /** Session ID where agent is currently working (only that row shows „pracuje”) */
+  let busySessionId = null;
+
+  /** Osobny stan UI dla Home i Code — zero mieszania. */
+  function emptyBag() {
+    return {
+      selectedId: null,
+      liveSessionId: null,
+      allMessages: [],
+      messages: [],
+      streamingAssistant: null,
+      liveTools: [],
+      attachments: [],
+      messageQueue: [],
+      busy: false,
+      visibleCount: PAGE,
+      showActivity: false,
+      wsTitle: "New chat",
+      cwd: "",
+      statusPhase: "",
+      statusDetail: "",
+    };
+  }
+  const bags = { home: emptyBag(), grok: emptyBag() };
+  function bag(m) {
+    return bags[m || mode];
+  }
+
+  // Lokalne aliasy aktywnego worka — pullBag/pushBag przy switchu
+  let selectedId = null;
+  let liveSessionId = null;
+  let allMessages = [];
+  let messages = [];
+  let streamingAssistant = null;
+  let liveTools = [];
+  let attachments = [];
+  let messageQueue = [];
+  let busy = false;
+  let visibleCount = PAGE;
+  let showActivity = false;
+
+  function pullBag() {
+    const b = bag();
+    selectedId = b.selectedId;
+    liveSessionId = b.liveSessionId;
+    allMessages = b.allMessages;
+    messages = b.messages;
+    streamingAssistant = b.streamingAssistant;
+    liveTools = b.liveTools;
+    attachments = b.attachments;
+    messageQueue = b.messageQueue;
+    busy = b.busy;
+    visibleCount = b.visibleCount;
+    showActivity = b.showActivity;
+  }
+
+  function pushBag() {
+    const b = bag();
+    b.selectedId = selectedId;
+    b.liveSessionId = liveSessionId;
+    b.allMessages = allMessages;
+    b.messages = messages;
+    b.streamingAssistant = streamingAssistant;
+    b.liveTools = liveTools;
+    b.attachments = attachments;
+    b.messageQueue = messageQueue;
+    b.busy = busy;
+    b.visibleCount = visibleCount;
+    b.showActivity = showActivity;
+    b.wsTitle = el.wsTitle ? el.wsTitle.textContent : b.wsTitle;
+  }
+
+  function persistNav() {
+    const payload = {
+      lastMode: mode,
+      lastHomeSessionId: bags.home.liveSessionId || bags.home.selectedId || "",
+      lastCodeSessionId: bags.grok.liveSessionId || bags.grok.selectedId || "",
+    };
+    api.setSettings(payload).catch(() => {});
+  }
+
+  const el = {
+    app: document.getElementById("app"),
+    list: document.getElementById("session-list"),
+    filter: document.getElementById("filter"),
+    banner: document.getElementById("banner"),
+    messages: document.getElementById("messages"),
+    chatScroll: document.getElementById("chat-scroll"),
+    homeHero: document.getElementById("home-hero"),
+    input: document.getElementById("input"),
+    form: document.getElementById("composer"),
+    btnSend: document.getElementById("btn-send"),
+    btnStop: document.getElementById("btn-stop"),
+    btnNew: document.getElementById("btn-new"),
+    btnNewLabel: document.getElementById("btn-new-label"),
+    modelSelect: document.getElementById("model-select"),
+    cwdChip: document.getElementById("cwd-chip"),
+    busyChip: document.getElementById("busy-chip"),
+    wsTitle: document.getElementById("ws-title"),
+    wsCwd: document.getElementById("ws-cwd"),
+    wsModeBadge: document.getElementById("ws-mode-badge"),
+    toast: document.getElementById("toast"),
+    modal: document.getElementById("modal"),
+    modalTitle: document.getElementById("modal-title"),
+    modalBody: document.getElementById("modal-body"),
+    modalInput: document.getElementById("modal-input"),
+    modalOk: document.getElementById("modal-ok"),
+    modalCancel: document.getElementById("modal-cancel"),
+    settingsModal: document.getElementById("settings-modal"),
+    accountModal: document.getElementById("account-modal"),
+    accountDetail: document.getElementById("account-detail"),
+    tabHome: document.getElementById("tab-home"),
+    tabGrok: document.getElementById("tab-grok"),
+    accountName: document.getElementById("account-name"),
+    accountSub: document.getElementById("account-sub"),
+    accountAvatar: document.getElementById("account-avatar"),
+    ctxMenu: document.getElementById("ctx-menu"),
+    btnExpand: document.getElementById("btn-expand"),
+    attachChips: document.getElementById("attach-chips"),
+    statusBar: document.getElementById("status-bar"),
+    statusText: document.getElementById("status-text"),
+    activityPanel: document.getElementById("activity-panel"),
+    btnToggleActivity: document.getElementById("btn-toggle-activity"),
+    dropOverlay: document.getElementById("drop-overlay"),
+    recentsLabel: document.getElementById("recents-label"),
+    finePrint: document.getElementById("fine-print"),
+  };
+
+  function rowsForMode() {
+    return mode === "home" ? homeRows : codeRows;
+  }
+
+  function selectedRow() {
+    return rowsForMode().find((r) => r.id === selectedId) || null;
+  }
+
+  function basenameCwd(cwd) {
+    if (!cwd) return mode === "home" ? "chat" : "sosky";
+    const parts = cwd.replace(/\/+$/, "").split("/");
+    return parts[parts.length - 1] || cwd;
+  }
+
+  function relativeTime(iso) {
+    if (!iso) return "";
+    const t = Date.parse(iso);
+    if (!t) return "";
+    const sec = Math.round((Date.now() - t) / 1000);
+    if (sec < 60) return `${sec}s`;
+    const min = Math.round(sec / 60);
+    if (min < 60) return `${min}m`;
+    const h = Math.round(min / 60);
+    if (h < 48) return `${h}h`;
+    return `${Math.round(h / 24)}d`;
+  }
+
+  function dayBucket(iso) {
+    if (!iso) return "Earlier";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "Earlier";
+    const now = new Date();
+    const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startThat = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const diff = (startToday - startThat) / 86400000;
+    if (diff === 0) return "Today";
+    if (diff === 1) return "Yesterday";
+    if (diff < 7) return "Previous 7 days";
+    return "Earlier";
+  }
+
+  function showToast(msg, kind = "") {
+    el.toast.textContent = msg;
+    el.toast.classList.remove("hidden", "error", "ok");
+    if (kind) el.toast.classList.add(kind);
+    clearTimeout(showToast._t);
+    showToast._t = setTimeout(() => el.toast.classList.add("hidden"), 4000);
+  }
+
+  function setBanner(msg, isError = false) {
+    if (!msg) {
+      el.banner.classList.add("hidden");
+      el.banner.textContent = "";
+      return;
+    }
+    el.banner.textContent = msg;
+    el.banner.classList.remove("hidden");
+    el.banner.classList.toggle("error", isError);
+  }
+
+  /**
+   * Tytuły tooli z ACP to często "Execute `python3 ...`" albo cała komenda.
+   * Do UI idzie TYLKO krótka ludzka etykieta — nigdy surowy kod.
+   */
+  function humanizeToolTitle(raw) {
+    const s = String(raw || "").trim();
+    if (!s) return "Narzędzie";
+    // Read `/path…` / Write / Edit — nigdy surowa ścieżka w statusie
+    if (/^(read|write|edit|search|grep|bash|execute)\b/i.test(s) || s.length > 48) {
+      const low = s.toLowerCase();
+      if (/\b(python3?|node|bash|zsh|sh|curl|ffmpeg|osascript)\b/.test(low))
+        return "Terminal";
+      if (/^read\b|\bread_file\b|\bcat\b|\bhead\b|\btail\b/.test(low))
+        return "Czytam plik";
+      if (/\b(write|edit|patch|search_replace|sed)\b/.test(low)) return "Edytuję plik";
+      if (/\b(grep|rg|find|search_tool|web_search)\b/.test(low)) return "Szukam";
+      if (/\b(web_search|browse|http|open_page)\b/.test(low)) return "Sieć";
+      if (/^Execute\b/i.test(s)) return "Terminal";
+      if (/\/|\\/.test(s)) return "Plik";
+      return "Narzędzie";
+    }
+    if (/^\/Users\//.test(s) || /^[A-Za-z]:\\/.test(s)) return "Plik";
+    const one = s.replace(/\s+/g, " ").slice(0, 40);
+    return one.length < s.replace(/\s+/g, " ").length ? one + "…" : one;
+  }
+
+  function setStatus(phase, detail, forMode) {
+    const target = forMode || mode;
+    const b = bags[target];
+    // Zawsze humanizuj detail (tool titles = kody)
+    let safeDetail = detail || "";
+    if (phase === "tool" || /^Execute\b/i.test(safeDetail) || safeDetail.length > 100) {
+      safeDetail = humanizeToolTitle(safeDetail);
+      if (phase === "tool" && (!safeDetail || safeDetail === "Narzędzie")) {
+        safeDetail = "Pracuję w tle…";
+      }
+    }
+    b.statusPhase = phase || "";
+    b.statusDetail = safeDetail;
+    // Status UI tylko dla AKTYWNEGO trybu
+    if (target !== mode) return;
+
+    const map = {
+      queued: "Start…",
+      starting: "Uruchamiam agenta…",
+      session: "Ładuję sesję…",
+      thinking: "Myślę…",
+      generating_image: "Generuję grafikę…",
+      responding: "Piszę…",
+      tool: "Pracuję w tle…",
+      done: "Gotowe",
+      stopped: "Przerwano",
+      error: "Błąd",
+    };
+    // Dla tool/thinking: preferuj krótką etykietę, nie surowy detail z ACP
+    let label;
+    if (phase === "tool") {
+      label = safeDetail && safeDetail !== "Narzędzie" ? safeDetail : map.tool;
+    } else if (phase === "thinking" || phase === "responding") {
+      label = map[phase] || safeDetail;
+    } else {
+      label = safeDetail || map[phase] || phase || "";
+    }
+    // Ostateczna blokada: nigdy nie wklejaj Execute / ścieżek w status
+    if (/^Execute\b/i.test(label) || /GROK_SESSIONS_ATTACHMENTS/i.test(label)) {
+      label = map[phase] || "Pracuję…";
+    }
+    if (label.length > 60) label = humanizeToolTitle(label);
+
+    if (!label || phase === "done") {
+      if (!busy) {
+        el.statusBar.classList.add("hidden");
+      } else {
+        el.statusText.textContent = label || "Working…";
+        el.statusBar.classList.remove("hidden");
+      }
+      return;
+    }
+    el.statusText.textContent = label;
+    el.statusBar.classList.remove("hidden");
+  }
+
+  function renderActivity() {
+    const active = liveTools.filter((t) => t.status !== "completed" && t.status !== "failed");
+    const done = liveTools.filter((t) => t.status === "completed" || t.status === "failed");
+    el.btnToggleActivity.classList.toggle("hidden", liveTools.length === 0);
+    el.btnToggleActivity.textContent = showActivity
+      ? "Ukryj kroki"
+      : `Kroki (${liveTools.length})`;
+
+    if (!showActivity || !liveTools.length) {
+      el.activityPanel.classList.add("hidden");
+      el.activityPanel.innerHTML = "";
+      return;
+    }
+    el.activityPanel.classList.remove("hidden");
+    el.activityPanel.innerHTML = "";
+    if (active.length) {
+      const h = document.createElement("div");
+      h.className = "activity-group";
+      h.textContent = "W toku";
+      el.activityPanel.appendChild(h);
+      for (const t of active) {
+        const row = document.createElement("div");
+        row.className = "activity-row live";
+        row.textContent = `${humanizeToolTitle(t.title)} · ${t.status || "…"}`;
+        el.activityPanel.appendChild(row);
+      }
+    }
+    if (done.length) {
+      const h = document.createElement("div");
+      h.className = "activity-group";
+      h.textContent = `Ukończone (${done.length}) — zwinięte domyślnie`;
+      el.activityPanel.appendChild(h);
+      const det = document.createElement("details");
+      det.className = "activity-done";
+      const sum = document.createElement("summary");
+      sum.textContent = `Pokaż ${done.length} completed`;
+      det.appendChild(sum);
+      for (const t of done) {
+        const row = document.createElement("div");
+        row.className = "activity-row done";
+        row.textContent = humanizeToolTitle(t.title);
+        det.appendChild(row);
+      }
+      el.activityPanel.appendChild(det);
+    }
+  }
+
+  function setMode(next, { restoreSession = true } = {}) {
+    if (next !== "home" && next !== "grok") return;
+    // Zapisz stan aktualnego trybu PRZED przełączeniem
+    pushBag();
+    mode = next;
+    pullBag();
+
+    el.tabHome.classList.toggle("active", mode === "home");
+    el.tabGrok.classList.toggle("active", mode === "grok");
+    el.wsModeBadge.textContent = mode === "home" ? "Home" : "Build";
+    el.btnNewLabel.textContent = mode === "home" ? "New chat" : "New session";
+    el.recentsLabel.textContent =
+      mode === "home" ? "Recents · Home" : "Recents · Build";
+    el.finePrint.textContent =
+      mode === "home"
+        ? "Home · czat i grafiki (/image …) · przeciągnij pliki lub wklej screenshot"
+        : "Build · agent z narzędziami · załączniki jako ścieżki na dysku";
+    document.getElementById("hero-title").textContent =
+      mode === "home" ? "How can I help you today?" : "What should we build?";
+    document.getElementById("hero-sub").textContent =
+      mode === "home"
+        ? "Jak Grok w przeglądarce: rozmowa, pomysły, /image do grafik. Nie agent kodujący."
+        : "Build: pliki, shell, edycje. Załączniki idą do agenta jako ścieżki.";
+
+    el.wsTitle.textContent = bag().wsTitle || "New chat";
+    updatePathChips(mode === "home" ? "" : selectedRow()?.cwd || defaultCwd);
+    applyModelsForMode();
+    // Paski trybu
+    const mediaBar = document.getElementById("home-media-bar");
+    const effortWrap = document.getElementById("effort-wrap");
+    const ratioWrap = document.getElementById("ratio-wrap");
+    if (mediaBar) mediaBar.classList.toggle("hidden", mode !== "home");
+    if (effortWrap) effortWrap.classList.toggle("hidden", mode !== "grok");
+    if (ratioWrap) {
+      ratioWrap.classList.toggle(
+        "hidden",
+        mode !== "home" || homeKind === "chat"
+      );
+    }
+    setBusy(busy); // odśwież UI busy dla TEGO trybu
+    if (bag().statusDetail || bag().statusPhase) {
+      setStatus(bag().statusPhase, bag().statusDetail);
+    } else if (!busy) {
+      el.statusBar.classList.add("hidden");
+    }
+    renderList();
+    renderAttachChips();
+    renderMessages({ forceScroll: true });
+    renderActivity();
+    persistNav();
+
+    // Przywróć ostatnią sesję tego trybu (nie wracaj zawsze na hero)
+    if (restoreSession) {
+      const wantId = liveSessionId || selectedId;
+      if (wantId) {
+        const row = rowsForMode().find((r) => r.id === wantId);
+        if (row) {
+          // Jeśli wiadomości już w worku — tylko UI; inaczej dociągnij transcript
+          if (!allMessages.length) openSession(row, { fromSwitch: true });
+          else {
+            selectedId = row.id;
+            liveSessionId = row.id;
+            el.wsTitle.textContent = row.title;
+            renderList();
+          }
+        }
+      }
+    }
+    el.input.focus();
+  }
+
+  function updatePathChips(cwd) {
+    if (mode === "home") {
+      el.cwdChip.textContent = "Home chat";
+      el.wsCwd.textContent = "browser-style";
+    } else {
+      el.cwdChip.textContent = cwd || defaultCwd;
+      el.wsCwd.textContent = basenameCwd(cwd || defaultCwd);
+    }
+  }
+
+  function filteredRows() {
+    const q = filter.trim().toLowerCase();
+    const list = rowsForMode();
+    if (!q) return list;
+    return list.filter(
+      (r) =>
+        (r.title || "").toLowerCase().includes(q) ||
+        (r.id || "").toLowerCase().includes(q) ||
+        (r.cwd || "").toLowerCase().includes(q)
+    );
+  }
+
+  function renderList() {
+    const list = filteredRows();
+    el.list.innerHTML = "";
+    if (!list.length) {
+      const li = document.createElement("li");
+      li.className = "session-item";
+      li.style.cursor = "default";
+      li.innerHTML = `<div><div class="title" style="color:var(--faint)">${
+        mode === "home" ? "Brak czatów Home — napisz poniżej" : "Brak sesji Build"
+      }</div></div>`;
+      el.list.appendChild(li);
+      return;
+    }
+    const groups = new Map();
+    for (const r of list) {
+      const g = dayBucket(r.lastActiveAt || r.updatedAt);
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(r);
+    }
+    for (const [group, items] of groups) {
+      const lab = document.createElement("li");
+      lab.className = "session-group-label";
+      lab.textContent = group;
+      el.list.appendChild(lab);
+      for (const r of items) {
+        const li = document.createElement("li");
+        const isWorking =
+          mode === "grok" && busySessionId && r.id === busySessionId;
+        const isTerminalLive = Boolean(r.isActive) && !isWorking;
+        li.className =
+          "session-item" +
+          (r.id === selectedId || r.id === liveSessionId ? " selected" : "") +
+          (isWorking ? " working" : "");
+        li.innerHTML = `
+          <div style="min-width:0">
+            <div class="title"></div>
+            <div class="meta"></div>
+          </div>
+          ${
+            isWorking
+              ? '<span class="live-dot working" title="Pracuje w tej sesji"></span>'
+              : isTerminalLive
+                ? '<span class="live-dot" title="Aktywna w terminalu"></span>'
+                : ""
+          }`;
+        li.querySelector(".title").textContent = r.title;
+        li.querySelector(".meta").textContent = [
+          mode === "home" ? "Home" : basenameCwd(r.cwd),
+          isWorking
+            ? "pracuje…"
+            : relativeTime(r.lastActiveAt || r.updatedAt),
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        li.addEventListener("click", () => openSession(r));
+        li.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          showCtx(e.clientX, e.clientY, r.id);
+        });
+        el.list.appendChild(li);
+      }
+    }
+  }
+
+  function syncVisibleMessages() {
+    messages =
+      allMessages.length <= visibleCount
+        ? allMessages.slice()
+        : allMessages.slice(allMessages.length - visibleCount);
+  }
+
+  function toolIcon(title) {
+    const t = (title || "").toLowerCase();
+    if (t.includes("bash") || t.includes("shell")) return ">_";
+    if (t.includes("read")) return "📄";
+    if (t.includes("edit") || t.includes("write")) return "✎";
+    if (t.includes("search") || t.includes("grep")) return "⌕";
+    if (t.includes("web")) return "🌐";
+    return "⚙";
+  }
+
+  function nearBottom(threshold = 140) {
+    const box = el.chatScroll;
+    if (!box) return true;
+    return box.scrollHeight - box.scrollTop - box.clientHeight < threshold;
+  }
+
+  /** Podczas busy / streamu zawsze trzymaj dół — zero „przelotu” od startu sesji. */
+  function shouldStickBottom(force) {
+    if (force) return true;
+    if (busy) return true;
+    return nearBottom(200);
+  }
+
+  function scrollChatToBottom(instant) {
+    const box = el.chatScroll;
+    if (!box) return;
+    if (instant) {
+      const prev = box.style.scrollBehavior;
+      box.style.scrollBehavior = "auto";
+      box.scrollTop = box.scrollHeight;
+      box.style.scrollBehavior = prev || "";
+    } else {
+      box.scrollTop = box.scrollHeight;
+    }
+  }
+
+  /** Zachowaj pozycję scrolla czatu (composer autosize nie skacze). */
+  function preserveChatScroll(fn) {
+    const box = el.chatScroll;
+    if (!box) {
+      fn();
+      return;
+    }
+    const prevTop = box.scrollTop;
+    const wasBottom = shouldStickBottom(false);
+    fn();
+    const restore = () => {
+      if (!el.chatScroll) return;
+      if (wasBottom || busy) scrollChatToBottom(true);
+      else {
+        el.chatScroll.scrollTop = prevTop;
+        if (el.chatScroll.scrollTop === 0 && prevTop > 0) {
+          el.chatScroll.scrollTop = prevTop;
+        }
+      }
+    };
+    restore();
+    requestAnimationFrame(restore);
+  }
+
+  /** Aktualizuj ostatnią odpowiedź bez full re-render (bez skoku scrolla). */
+  function patchLastAssistantBubble(m) {
+    if (!m) return;
+    const stick = nearBottom();
+    let last = el.messages.lastElementChild;
+    if (!last || !last.classList.contains("assistant")) {
+      renderMessages({ forceScroll: stick });
+      return;
+    }
+    let content = last.querySelector(".msg-content");
+    const safe = cleanAssistantText(m.text || "");
+    if (!safe) {
+      if (content) content.textContent = "";
+      return;
+    }
+    if (!content) {
+      content = document.createElement("div");
+      content.className = "msg-content";
+      last.querySelector(".msg-body")?.appendChild(content);
+    }
+    if (typeof renderMarkdown === "function") {
+      content.innerHTML = renderMarkdown(safe);
+    } else {
+      content.textContent = safe;
+    }
+    const typing = last.querySelector(".typing");
+    if (typing && safe) typing.remove();
+    if (stick || busy) scrollChatToBottom(true);
+  }
+
+  function patchThinking(m) {
+    if (!m) return;
+    const stick = nearBottom();
+    let last = el.messages.lastElementChild;
+    if (!last || !last.classList.contains("assistant")) {
+      renderMessages({ forceScroll: stick });
+      return;
+    }
+    let det = last.querySelector("details.thinking");
+    if (!det) {
+      det = document.createElement("details");
+      det.className = "thinking";
+      det.open = true;
+      const sum = document.createElement("summary");
+      sum.textContent = "Thinking…";
+      const tb = document.createElement("div");
+      tb.className = "thinking-body";
+      det.appendChild(sum);
+      det.appendChild(tb);
+      const body = last.querySelector(".msg-body");
+      const label = body?.querySelector(".msg-label");
+      if (body && label) label.after(det);
+      else body?.prepend(det);
+    }
+    const tb = det.querySelector(".thinking-body");
+    if (tb) tb.textContent = (m.thinking || "").slice(0, 3000);
+    const sum = det.querySelector("summary");
+    if (sum) sum.textContent = busy ? "Thinking…" : "Thinking";
+    det.open = Boolean(busy);
+    if (stick) el.chatScroll.scrollTop = el.chatScroll.scrollHeight;
+  }
+
+  function renderMessages(opts = {}) {
+    const forceScroll = Boolean(opts.forceScroll);
+    const box = el.chatScroll;
+    const prevTop = box ? box.scrollTop : 0;
+    // busy = zawsze dół (bez animowanego skoku przez całą historię)
+    const stickBottom = shouldStickBottom(forceScroll);
+
+    // Blokuj scroll podczas wipe — inaczej widać „od startu do końca”
+    if (box) {
+      box.style.overflowAnchor = "none";
+      box.style.scrollBehavior = "auto";
+    }
+
+    const frag = document.createDocumentFragment();
+    const hasMsgs = allMessages.length > 0;
+    el.homeHero.classList.toggle("hidden", hasMsgs);
+
+    if (allMessages.length > messages.length) {
+      const more = document.createElement("button");
+      more.type = "button";
+      more.className = "load-more";
+      more.textContent = `Load earlier (${allMessages.length - messages.length})`;
+      more.onclick = () => {
+        visibleCount = Math.min(allMessages.length, visibleCount + PAGE);
+        syncVisibleMessages();
+        renderMessages();
+      };
+      frag.appendChild(more);
+    }
+
+    for (const m of messages) {
+      const row = document.createElement("div");
+      row.className = `msg ${m.role}`;
+      const av = document.createElement("div");
+      av.className = "msg-avatar";
+      av.textContent = m.role === "user" ? "Y" : "✦";
+      row.appendChild(av);
+
+      const body = document.createElement("div");
+      body.className = "msg-body";
+      const label = document.createElement("div");
+      label.className = "msg-label";
+      label.textContent = m.role === "user" ? "You" : "Grok";
+      body.appendChild(label);
+
+      // Thinking — zwinięte, bez pełnego tekstu w czacie (robotę widać w „Kroki”)
+      if (m.thinking && mode === "grok") {
+        const pill = document.createElement("div");
+        pill.className =
+          "agent-work-summary" + (m._streaming && busy ? " live" : "");
+        pill.textContent =
+          m._streaming && busy ? "Thinking…" : "Thinking (ukryte w czacie)";
+        body.appendChild(pill);
+      }
+
+      // Tools — NIE pokazuj dumpów bash/kodu w czacie. Tylko skrót.
+      if (mode === "grok" && m.tools && m.tools.length) {
+        const active = m.tools.filter(
+          (t) => t.status !== "completed" && t.status !== "failed"
+        );
+        const done = m.tools.filter(
+          (t) => t.status === "completed" || t.status === "failed"
+        );
+        const pill = document.createElement("div");
+        pill.className =
+          "agent-work-summary" + (active.length ? " live" : "");
+        if (active.length) {
+          const ht = humanizeToolTitle(active[0].title);
+          pill.textContent = `Pracuję: ${ht}${
+            active.length > 1 ? ` +${active.length - 1}` : ""
+          }`;
+        } else {
+          pill.textContent = `${done.length} kroków w tle (ukryte) · patrz „Kroki”`;
+        }
+        body.appendChild(pill);
+      }
+
+      if (m.attachments && m.attachments.length) {
+        const wrap = document.createElement("div");
+        wrap.className = "msg-atts";
+        for (const a of m.attachments) {
+          const chip = document.createElement("span");
+          chip.className = "msg-att";
+          chip.textContent = a.name || a.path || "file";
+          wrap.appendChild(chip);
+        }
+        body.appendChild(wrap);
+      }
+
+      if (m.images && m.images.length) {
+        const gal = document.createElement("div");
+        gal.className = "msg-images";
+        for (const img of m.images) {
+          const im = document.createElement("img");
+          im.className = "msg-image";
+          if (img.b64) {
+            im.src = `data:${img.mimeType || "image/png"};base64,${img.b64}`;
+          } else if (img.path) {
+            im.alt = img.path;
+            api.readPreview(img.path).then((r) => {
+              if (r.ok) im.src = r.dataUrl;
+            });
+          }
+          gal.appendChild(im);
+        }
+        body.appendChild(gal);
+      }
+
+      let displayText =
+        m.role === "user"
+          ? cleanUserText(m.text)
+          : cleanAssistantText(m.text || "");
+      // Puste bańki / sam załącznik bez tekstu — nie doklejaj pustego contentu
+      if (displayText) {
+        const content = document.createElement("div");
+        content.className = "msg-content";
+        if (m.role === "assistant" && typeof renderMarkdown === "function") {
+          content.innerHTML = renderMarkdown(displayText);
+        } else {
+          content.textContent = displayText;
+        }
+        body.appendChild(content);
+      } else if (
+        m.role === "assistant" &&
+        m._streaming &&
+        busy &&
+        !(m.tools && m.tools.length) &&
+        !m.thinking
+      ) {
+        const wait = document.createElement("div");
+        wait.className = "typing";
+        wait.textContent = "…";
+        body.appendChild(wait);
+      }
+      if (m._queued) {
+        const q = document.createElement("div");
+        q.className = "queued-badge";
+        q.textContent = "w kolejce";
+        body.appendChild(q);
+      }
+
+      if (m._streaming && busy && !m.text && !m.thinking) {
+        const wait = document.createElement("div");
+        wait.className = "typing";
+        wait.textContent = "…";
+        body.appendChild(wait);
+      }
+
+      const actions = document.createElement("div");
+      actions.className = "msg-actions";
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.textContent = "Copy";
+      copyBtn.onclick = async () => {
+        try {
+          const clean =
+            m.role === "user"
+              ? cleanUserText(m.text || "")
+              : cleanAssistantText(m.text || "");
+          await navigator.clipboard.writeText(clean || m.text || "");
+          showToast("Copied", "ok");
+        } catch {
+          showToast("Copy failed", "error");
+        }
+      };
+      actions.appendChild(copyBtn);
+      body.appendChild(actions);
+
+      row.appendChild(body);
+      frag.appendChild(row);
+    }
+
+    // Atomowa podmiana — scroll ustawiony w tym samym ticku, zanim przeglądarka namaluje 0
+    el.messages.replaceChildren(frag);
+    if (box) {
+      if (stickBottom) {
+        box.scrollTop = box.scrollHeight;
+      } else {
+        box.scrollTop = prevTop;
+      }
+    }
+    // drugi pass po layout (obrazy / fonty)
+    requestAnimationFrame(() => {
+      if (!el.chatScroll) return;
+      if (stickBottom || busy) scrollChatToBottom(true);
+      else if (prevTop > 0) el.chatScroll.scrollTop = prevTop;
+    });
+  }
+
+  function toolCardEl(t, compact) {
+    const card = document.createElement("div");
+    card.className = "tool-card" + (compact ? " compact" : "");
+    card.innerHTML = `
+      <div class="tool-head">
+        <span class="tool-ico"></span>
+        <span class="tool-title"></span>
+        <span class="tool-status"></span>
+      </div>`;
+    card.querySelector(".tool-ico").textContent = toolIcon(t.title);
+    card.querySelector(".tool-title").textContent = humanizeToolTitle(
+      t.title || "tool"
+    );
+    card.querySelector(".tool-status").textContent = t.status || "";
+    return card;
+  }
+
+  function renderAttachChips() {
+    if (!attachments.length) {
+      el.attachChips.classList.add("hidden");
+      el.attachChips.innerHTML = "";
+      return;
+    }
+    el.attachChips.classList.remove("hidden");
+    el.attachChips.innerHTML = "";
+    attachments.forEach((a, i) => {
+      const chip = document.createElement("div");
+      chip.className = "attach-chip";
+      const label = document.createElement("span");
+      label.textContent =
+        (a.kind === "image" ? "🖼 " : a.kind === "folder" ? "📁 " : "📄 ") +
+        (a.name || "file");
+      const x = document.createElement("button");
+      x.type = "button";
+      x.textContent = "×";
+      x.onclick = () => {
+        attachments.splice(i, 1);
+        renderAttachChips();
+      };
+      chip.appendChild(label);
+      chip.appendChild(x);
+      if (a.kind === "image" && a.path) {
+        api.readPreview(a.path).then((r) => {
+          if (!r.ok) return;
+          const img = document.createElement("img");
+          img.src = r.dataUrl;
+          img.className = "attach-thumb";
+          chip.insertBefore(img, label);
+        });
+      }
+      el.attachChips.appendChild(chip);
+    });
+  }
+
+  function applyAccount(account) {
+    if (!account) return;
+    el.accountName.textContent = account.name || account.label || "—";
+    el.accountSub.textContent = account.loggedIn
+      ? account.email || "signed in"
+      : "Not signed in";
+    el.accountAvatar.textContent = (
+      account.name ||
+      account.email ||
+      "?"
+    )
+      .trim()
+      .charAt(0)
+      .toUpperCase();
+    el.accountDetail.textContent = account.loggedIn
+      ? `${account.name || ""}\n${account.email || ""}\nSuperGrok / xAI session`
+      : "Nie zalogowano. Użyj Log in.";
+  }
+
+  function applyModelsForMode() {
+    const select = el.modelSelect;
+    select.innerHTML = "";
+    if (mode === "home") {
+      const opts = [
+        { modelId: "grok-4.5", name: "Grok 4.5" },
+        { modelId: "grok-4.3", name: "Grok 4.3" },
+        { modelId: "grok-imagine-image", name: "Imagine · image" },
+      ];
+      for (const m of opts) {
+        const o = document.createElement("option");
+        o.value = m.modelId;
+        o.textContent = m.name;
+        select.appendChild(o);
+      }
+      select.value = homeModelId;
+    } else {
+      const o = document.createElement("option");
+      o.value = codeModelId || "grok-4.5";
+      o.textContent = codeModelId || "Grok 4.5";
+      select.appendChild(o);
+      select.value = codeModelId || "grok-4.5";
+    }
+  }
+
+  function applyPayload(payload) {
+    codeRows = (payload.rows || []).filter((r) => r.kind !== "home");
+    homeRows = payload.homeRows || [];
+    defaultCwd = payload.settings?.defaultCwd || defaultCwd;
+    homeModelId = payload.settings?.homeModelId || homeModelId;
+    codeModelId = payload.settings?.modelId || codeModelId;
+    // busy tylko na jednej sesji Build
+    if (payload.busySessionId !== undefined) {
+      busySessionId = payload.busySessionId || null;
+    } else if (payload.promptBusy && payload.activeSessionId) {
+      busySessionId = payload.activeSessionId;
+    } else if (payload.promptBusy === false) {
+      busySessionId = null;
+    }
+    if (!selectedId) updatePathChips(mode === "home" ? "" : defaultCwd);
+
+    applyAccount(payload.account);
+    if (mode === "grok" && payload.models?.availableModels?.length) {
+      const select = el.modelSelect;
+      const cur = payload.models.currentModelId || codeModelId;
+      select.innerHTML = "";
+      for (const m of payload.models.availableModels) {
+        const o = document.createElement("option");
+        o.value = m.modelId;
+        o.textContent = m.name || m.modelId;
+        select.appendChild(o);
+      }
+      select.value = cur;
+      codeModelId = cur;
+    } else if (mode === "home") {
+      applyModelsForMode();
+    }
+
+    const parts = [];
+    if (payload.error) parts.push(payload.error);
+    if (payload.grokBinary && !payload.grokBinary.ok && mode === "grok") {
+      parts.push(payload.grokBinary.reason);
+    }
+    if (payload.authOk === false) parts.push("Not signed in — Settings → Log in");
+    setBanner(parts.join(" · "), parts.length > 0);
+
+    renderList();
+    if (selectedRow()) {
+      el.wsTitle.textContent = selectedRow().title;
+      updatePathChips(selectedRow().cwd);
+    }
+  }
+
+  async function refresh() {
+    applyPayload(await api.list());
+  }
+
+  async function openSession(row, opts = {}) {
+    selectedId = row.id;
+    liveSessionId = row.id;
+    el.wsTitle.textContent = row.title;
+    bag().wsTitle = row.title;
+    updatePathChips(row.cwd);
+    renderList();
+
+    const reuse =
+      opts.fromSwitch &&
+      allMessages.length > 0 &&
+      (liveSessionId === row.id || selectedId === row.id);
+
+    if (!reuse) {
+      allMessages = [];
+      messages = [];
+      streamingAssistant = null;
+      if (!opts.fromSwitch) liveTools = [];
+      visibleCount = PAGE;
+      renderMessages({ forceScroll: true });
+      renderActivity();
+
+      const tr = await api.transcript({
+        id: row.id,
+        dirPath: row.dirPath,
+        mode: mode === "home" ? "home" : "grok",
+      });
+      if (tr.error) showToast(tr.error, "error");
+      allMessages = (tr.messages || [])
+        .map((m, i) => {
+          const raw = m.text || m.content || "";
+          let text =
+            m.role === "user"
+              ? cleanUserText(raw)
+              : cleanAssistantText(raw);
+          // humanizuj tytuły tooli z historii (bez raw Execute w pillach)
+          const tools = (m.tools || []).map((t) => ({
+            ...t,
+            title: t.title || "tool",
+          }));
+          return {
+            ...m,
+            id: m.id || `m-${i}`,
+            text:
+              text ||
+              (m.role === "user" && (m.attachments || []).length ? "" : text),
+            tools,
+          };
+        })
+        .filter((m) => {
+          if (
+            m.role === "user" &&
+            !m.text &&
+            !(m.attachments && m.attachments.length) &&
+            !(m.images && m.images.length)
+          ) {
+            return false;
+          }
+          // puste bańki asystenta bez tooli/thinking — śmieci
+          if (
+            m.role === "assistant" &&
+            !m.text &&
+            !(m.tools && m.tools.length) &&
+            !m.thinking &&
+            !(m.images && m.images.length)
+          ) {
+            return false;
+          }
+          return true;
+        });
+      syncVisibleMessages();
+      renderMessages({ forceScroll: true });
+    } else {
+      renderMessages({ forceScroll: true });
+      renderActivity();
+    }
+    pushBag();
+    persistNav();
+    // po przełączeniu sesji — chip Working tylko jeśli to ta pracująca
+    setBusy(busy, mode);
+    el.input.focus();
+    if (typeof refreshUsage === "function") refreshUsage({ includeRate: false });
+  }
+
+  function modalPrompt({ title, body, okLabel = "OK", inputValue = null }) {
+    return new Promise((resolve) => {
+      el.modalTitle.textContent = title;
+      el.modalBody.textContent = body || "";
+      el.modalOk.textContent = okLabel;
+      if (inputValue != null) {
+        el.modalInput.classList.remove("hidden");
+        el.modalInput.value = inputValue;
+        el.modalInput.focus();
+      } else {
+        el.modalInput.classList.add("hidden");
+        el.modalInput.value = "";
+      }
+      el.modal.classList.remove("hidden");
+      const done = (v) => {
+        el.modal.classList.add("hidden");
+        el.modalOk.onclick = null;
+        el.modalCancel.onclick = null;
+        resolve(v);
+      };
+      el.modalOk.onclick = () =>
+        done(inputValue != null ? el.modalInput.value : true);
+      el.modalCancel.onclick = () => done(null);
+    });
+  }
+
+  function pushAll(msg) {
+    allMessages.push(msg);
+    syncVisibleMessages();
+  }
+
+  function lastAll() {
+    return allMessages[allMessages.length - 1] || null;
+  }
+
+  function ensureStreamingAssistant() {
+    if (streamingAssistant) return streamingAssistant;
+    streamingAssistant = {
+      id: `stream-${Date.now()}`,
+      role: "assistant",
+      text: "",
+      tools: [],
+      thinking: "",
+      _streaming: true,
+    };
+    pushAll(streamingAssistant);
+    return streamingAssistant;
+  }
+
+  function handleChatUpdate(params) {
+    // ACP stream dotyczy TYLKO Code. Jeśli jesteśmy w Home — zaktualizuj worek Code w tle, nie ruszaj UI Home.
+    if (mode === "home") {
+      applyCodeStreamInBackground(params);
+      return;
+    }
+    const update = params.update || params;
+    const kind = update.sessionUpdate;
+    if (!kind) return;
+
+    if (kind === "user_message_chunk") {
+      // Ignoruj echo promptu z załącznikami — UI ma już czysty bubble.
+      const raw = (update.content && update.content.text) || "";
+      if (isAttachmentJunkOnly(raw)) return;
+      const t = cleanUserText(raw);
+      if (!t) return;
+      const last = lastAll();
+      if (last && last.role === "user" && last._local) {
+        return;
+      }
+      if (last && last.role === "user" && (last.text === t || t.startsWith(last.text))) {
+        last.text = t.length > (last.text || "").length ? t : last.text;
+      } else {
+        pushAll({ id: `u-${Date.now()}`, role: "user", text: t, tools: [] });
+      }
+      streamingAssistant = null;
+      renderMessages();
+      return;
+    }
+
+    if (kind === "agent_message_chunk") {
+      const chunk = (update.content && update.content.text) || "";
+      // Nie pokazuj dumpów tooli / załączników w streamie
+      if (isAttachmentJunkOnly(chunk)) return;
+      if (isToolEchoText(chunk)) {
+        // tool echo — tylko status, nie treść w czacie
+        setStatus("tool", "Pracuję w tle…", "grok");
+        // jeśli bańka już ma śmieci — wyczyść
+        if (streamingAssistant) {
+          streamingAssistant.text = cleanAssistantText(streamingAssistant.text);
+          patchLastAssistantBubble(streamingAssistant);
+        }
+        return;
+      }
+      const a = ensureStreamingAssistant();
+      a.text += chunk;
+      a.text = cleanAssistantText(a.text);
+      // Po czyszczeniu nic nie zostało z tego chunka = to był dump
+      if (!a.text.trim()) {
+        setStatus("tool", "Pracuję w tle…", "grok");
+        return;
+      }
+      setStatus("responding", "Piszę…", "grok");
+      if (!handleChatUpdate._raf) {
+        handleChatUpdate._raf = requestAnimationFrame(() => {
+          handleChatUpdate._raf = null;
+          patchLastAssistantBubble(a);
+        });
+      }
+      return;
+    }
+
+    if (kind === "agent_thought_chunk") {
+      const a = ensureStreamingAssistant();
+      a.thinking += (update.content && update.content.text) || "";
+      setStatus("thinking", "Myślę…", "grok");
+      // NIE patchuj thinking w czacie — tylko status bar (zero skoków)
+      return;
+    }
+
+    if (kind === "tool_call") {
+      const a = ensureStreamingAssistant();
+      const rawTitle = update.title || update.tool || "tool";
+      const tool = {
+        id: update.toolCallId || `t-${a.tools.length}`,
+        title: rawTitle,
+        status: update.status || "pending",
+      };
+      a.tools.push(tool);
+      liveTools.push({ ...tool });
+      setStatus("tool", humanizeToolTitle(rawTitle), "grok");
+      renderActivity();
+      // NIE full renderMessages — tylko lekki skrót na ostatniej bańce
+      patchAgentWorkPill(a);
+      return;
+    }
+
+    if (kind === "tool_call_update") {
+      const a = ensureStreamingAssistant();
+      const id = update.toolCallId;
+      const tool =
+        a.tools.find((t) => t.id === id) || a.tools[a.tools.length - 1];
+      if (tool) {
+        if (update.status) tool.status = update.status;
+        if (update.title) tool.title = update.title;
+      }
+      const lt = liveTools.find((t) => t.id === id) || liveTools[liveTools.length - 1];
+      if (lt) {
+        if (update.status) lt.status = update.status;
+        if (update.title) lt.title = update.title;
+      }
+      if (tool && update.status !== "completed" && update.status !== "failed") {
+        setStatus("tool", humanizeToolTitle(tool.title), "grok");
+      }
+      renderActivity();
+      patchAgentWorkPill(a);
+    }
+  }
+
+  function patchAgentWorkPill(m) {
+    if (!m || mode !== "grok") return;
+    const stick = nearBottom();
+    let last = el.messages.lastElementChild;
+    if (!last || !last.classList.contains("assistant")) {
+      // bez full redraw — status bar wystarczy
+      return;
+    }
+    let pill = last.querySelector(".agent-work-summary");
+    const active = (m.tools || []).filter(
+      (t) => t.status !== "completed" && t.status !== "failed"
+    );
+    const done = (m.tools || []).filter(
+      (t) => t.status === "completed" || t.status === "failed"
+    );
+    const label = active.length
+      ? `Pracuję: ${humanizeToolTitle(active[0].title)}${active.length > 1 ? ` +${active.length - 1}` : ""}`
+      : done.length
+        ? `${done.length} kroków w tle · „Kroki”`
+        : m.thinking
+          ? "Thinking…"
+          : "";
+    if (!label) return;
+    if (!pill) {
+      pill = document.createElement("div");
+      pill.className = "agent-work-summary live";
+      const body = last.querySelector(".msg-body");
+      const labelEl = body?.querySelector(".msg-label");
+      if (body && labelEl) labelEl.after(pill);
+      else body?.prepend(pill);
+    }
+    pill.className =
+      "agent-work-summary" + (active.length || m._streaming ? " live" : "");
+    pill.textContent = label;
+    if (stick) el.chatScroll.scrollTop = el.chatScroll.scrollHeight;
+  }
+
+  /** Code stream w tle gdy UI jest na Home — nie miesza z wiadomościami Home. */
+  function applyCodeStreamInBackground(params) {
+    const update = params.update || params;
+    const kind = update.sessionUpdate;
+    if (!kind) return;
+    const b = bags.grok;
+    const ensure = () => {
+      if (b.streamingAssistant) return b.streamingAssistant;
+      b.streamingAssistant = {
+        id: `stream-${Date.now()}`,
+        role: "assistant",
+        text: "",
+        tools: [],
+        thinking: "",
+        _streaming: true,
+      };
+      b.allMessages.push(b.streamingAssistant);
+      return b.streamingAssistant;
+    };
+    if (kind === "agent_message_chunk") {
+      const chunk = (update.content && update.content.text) || "";
+      if (isToolEchoText(chunk) || isAttachmentJunkOnly(chunk)) return;
+      const a = ensure();
+      a.text += chunk;
+      a.text = cleanAssistantText(a.text);
+    } else if (kind === "agent_thought_chunk") {
+      ensure().thinking += (update.content && update.content.text) || "";
+      b.statusPhase = "thinking";
+      b.statusDetail = "Myślę…";
+    } else if (kind === "tool_call") {
+      const a = ensure();
+      const tool = {
+        id: update.toolCallId || `t-${a.tools.length}`,
+        title: update.title || update.tool || "tool",
+        status: update.status || "pending",
+      };
+      a.tools.push(tool);
+      b.liveTools.push({ ...tool });
+      b.statusPhase = "tool";
+      b.statusDetail = humanizeToolTitle(tool.title);
+    } else if (kind === "tool_call_update") {
+      const a = ensure();
+      const id = update.toolCallId;
+      const tool =
+        a.tools.find((t) => t.id === id) || a.tools[a.tools.length - 1];
+      if (tool && update.status) tool.status = update.status;
+      if (tool && update.title) tool.title = update.title;
+      const lt =
+        b.liveTools.find((t) => t.id === id) ||
+        b.liveTools[b.liveTools.length - 1];
+      if (lt && update.status) lt.status = update.status;
+      if (lt && update.title) lt.title = update.title;
+    }
+    b.messages =
+      b.allMessages.length <= b.visibleCount
+        ? b.allMessages.slice()
+        : b.allMessages.slice(b.allMessages.length - b.visibleCount);
+  }
+
+  function setBusy(b, forMode) {
+    const target = forMode || mode;
+    bags[target].busy = Boolean(b);
+    if (target !== mode) return; // nie ruszaj UI drugiego trybu
+
+    busy = Boolean(b);
+    const viewingBusySession =
+      mode === "home"
+        ? busy
+        : !busy
+          ? false
+          : !busySessionId ||
+            busySessionId === liveSessionId ||
+            busySessionId === selectedId;
+    // Composer ZAWSZE aktywny — w trakcie myślenia da się pisać i kolejkować.
+    el.btnSend.disabled = false;
+    el.btnSend.classList.remove("hidden");
+    el.btnSend.title = busy
+      ? viewingBusySession
+        ? "Dodaj do kolejki (wyśle po odpowiedzi)"
+        : "Agent w innej sesji Build — Enter doda do kolejki"
+      : "Send";
+    el.btnSend.classList.toggle("queue-mode", busy);
+    el.btnStop.classList.toggle("hidden", !busy);
+    // Chip Working tylko na sesji, która realnie pracuje
+    el.busyChip.classList.toggle("hidden", !viewingBusySession);
+    el.input.disabled = false;
+    el.input.readOnly = false;
+    if (busy && viewingBusySession) {
+      el.input.placeholder =
+        "Pisz dalej — Enter doda do kolejki…";
+    } else if (busy && !viewingBusySession) {
+      el.input.placeholder =
+        "Agent pracuje w innej sesji Build…";
+    } else {
+      el.input.placeholder =
+        "Message Grok… (Enter = send, ⌘V = wklej screenshot)";
+    }
+    updateQueueChip();
+    if (!b) {
+      if (!messageQueue.length) el.statusBar.classList.add("hidden");
+      if (streamingAssistant) streamingAssistant._streaming = false;
+    }
+  }
+
+  function updateQueueChip() {
+    let chip = document.getElementById("queue-chip");
+    if (!chip) {
+      chip = document.createElement("span");
+      chip.id = "queue-chip";
+      chip.className = "chip queue hidden";
+      el.busyChip.parentElement.insertBefore(chip, el.busyChip.nextSibling);
+    }
+    if (messageQueue.length) {
+      chip.classList.remove("hidden");
+      chip.textContent = `Kolejka: ${messageQueue.length}`;
+    } else {
+      chip.classList.add("hidden");
+    }
+  }
+
+  /** Strip internal attachment dump from displayed user text. Never show agent-only instructions. */
+  function cleanUserText(text) {
+    if (!text) return "";
+    let t = String(text);
+
+    // Jeśli cały chunk to marker załączników — zero dla UI
+    if (/GROK_SESSIONS_ATTACHMENTS/i.test(t)) {
+      // usuń cały marker w dowolnym miejscu
+      t = t.replace(
+        /<<<GROK_SESSIONS_ATTACHMENTS>>>[\s\S]*?(?:<<<END_GROK_SESSIONS_ATTACHMENTS>>>|$)/gi,
+        ""
+      );
+      if (!t.trim() || /^[\s#imagefilefolder\t"\/.a-zA-Z0-9_-]*$/.test(t)) {
+        return "";
+      }
+    }
+
+    // Machine markers — cały blok (w tym niezamknięty)
+    t = t.replace(
+      /<<<GROK_SESSIONS_ATTACHMENTS>>>[\s\S]*?(?:<<<END_GROK_SESSIONS_ATTACHMENTS>>>|$)/gi,
+      ""
+    );
+    t = t.replace(/<<<END_GROK_SESSIONS_ATTACHMENTS>>>/gi, "");
+    t = t.replace(/GROK_SESSIONS_ATTACHMENTS/gi, "");
+
+    // English instruction dumps
+    t = t.replace(/The user attached the following local files[\s\S]*/gi, "");
+    t = t.replace(
+      /Do not paste these paths back into your reply unless asked\.?/gi,
+      ""
+    );
+    t = t.replace(/Use tools to inspect them\.?/gi, "");
+    t = t.replace(
+      /Inspect the paths above with file tools[\s\S]*?(?=\n\n|$)/gi,
+      ""
+    );
+    t = t.replace(
+      /Never quote this block or the paths in the user-visible reply\.?/gi,
+      ""
+    );
+    t = t.replace(
+      /# inspect with file tools; never quote this block[^\n]*/gi,
+      ""
+    );
+
+    // Old dump formats + path lines
+    t = t.replace(/\s*\[Attachments[^\]]*\][\s\S]*/gi, "");
+    t = t.replace(/^\s*-\s*(image|file|folder):\s*.+$/gim, "");
+    t = t.replace(/^\s*\d+\.\s*(Image file|File|Folder)[^\n]*$/gim, "");
+    t = t.replace(
+      /read\/view this path with your file tools:?\s*"[^"]*"/gi,
+      ""
+    );
+    t = t.replace(/^[^\n]*grok-sessions\/attachments\/[^\n]*$/gim, "");
+    t = t.replace(
+      /"\/Users\/[^"]*\/grok-sessions\/attachments\/[^"]+"/g,
+      ""
+    );
+    // image\t"/path" lines from new format if marker missing
+    t = t.replace(/^(image|file|folder)\t.+$/gim, "");
+
+    return t.replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  /**
+   * Tekst asystenta dla człowieka: bez dumpów tooli, Execute `...`, ścieżek edycji, markerów.
+   * To właśnie „migające kody” z zrzutów.
+   */
+  function cleanAssistantText(text) {
+    if (!text) return "";
+    let t = cleanUserText(text);
+
+    // Execute `...` — zamykający backtick LUB do końca (stream niepełny / puste linie w skrypcie)
+    // 1) domknięte bloki (nawet z backtickami w środku: bierz od pierwszego ` po Execute do ostatniego sensownego)
+    t = t.replace(/Execute\s*`[\s\S]*?`(?=\s*(?:\n|$|Execute|[A-ZĄĆĘŁŃÓŚŹŻ]))/gi, "");
+    // 2) cokolwiek co zaczyna się od Execute — do końca linii / bloku; powtarzaj
+    let prev;
+    do {
+      prev = t;
+      t = t.replace(/Execute\s*`[\s\S]*$/gi, "");
+      t = t.replace(/Execute\s+[^\n]*(?:\n(?!\n)[^\n]*)*/gi, "");
+    } while (t !== prev);
+
+    // Linie będące samym dumpem komendy / ścieżki edycji
+    t = t.replace(
+      /^(edit|read|write|bash|search|grep|Execute)\s+`?[\/\w].*$/gim,
+      ""
+    );
+    t = t.replace(/^\/Users\/sosky\/[^\n]{10,}$/gim, "");
+    // heredoc / python one-liners z tool echo
+    t = t.replace(/^(python3?|node|bash|zsh|sh)\s+<<['`]?\w+['`]?[\s\S]*$/gim, "");
+
+    // Długie bloki kodu fenced — w Code nie w bańce czatu (to echo tooli)
+    if (mode === "grok") {
+      t = t.replace(/```[\s\S]*?```/g, "");
+      // niekompletny fence na końcu streamu
+      t = t.replace(/```[\s\S]*$/g, "");
+    }
+
+    // resztki po sklejeniu
+    t = t.replace(/\n{3,}/g, "\n\n").trim();
+    // jeśli zostało tylko śmieci techniczne albo sam kod
+    if (
+      t.length < 40 &&
+      /^(working|thinking|done|ok|\.+)?$/i.test(t.replace(/\s/g, ""))
+    ) {
+      return "";
+    }
+    // sam dump bez zdań po polsku/angielsku (np. import json,os...)
+    if (
+      t.length > 80 &&
+      !/[.!?…]/.test(t) &&
+      /^(import |from |const |def |function |#!\/|python|node )/m.test(t)
+    ) {
+      return "";
+    }
+    return t;
+  }
+
+  /** Chunk wygląda jak echo narzędzia (Execute / shell dump), nie odpowiedź do człowieka. */
+  function isToolEchoText(text) {
+    const t = String(text || "").trim();
+    if (!t) return false;
+    if (/^\s*Execute\b/i.test(t)) return true;
+    if (/GROK_SESSIONS_ATTACHMENTS/i.test(t)) return true;
+    // sam kod / komenda bez zdania
+    if (
+      t.length > 60 &&
+      !/[.!?…]/.test(t.slice(0, 200)) &&
+      /^(python3?|node|bash|zsh|sh|curl|import |from |const |def |#!\/)/i.test(t)
+    ) {
+      return true;
+    }
+    // prawie całość to jedna długa linia komendy
+    if (t.length > 120 && t.split("\n").length <= 2 && /[`'"\\]{3,}/.test(t)) {
+      return true;
+    }
+    return false;
+  }
+
+  /** True if text is only internal attachment junk (nothing for the user to see). */
+  function isAttachmentJunkOnly(text) {
+    const t = String(text || "").trim();
+    if (!t) return false;
+    if (/GROK_SESSIONS_ATTACHMENTS/i.test(t)) return true;
+    if (/The user attached the following local files/i.test(t)) return true;
+    if (/\[Attachments/i.test(t)) return true;
+    if (
+      /Image file.*read\/view this path/i.test(t) &&
+      cleanUserText(t).length < 8
+    ) {
+      return true;
+    }
+    return cleanUserText(t).length === 0 && t.length > 0;
+  }
+
+  function applyTheme(theme) {
+    const t = ["dark", "light", "auto"].includes(theme) ? theme : "dark";
+    document.documentElement.setAttribute("data-theme", t);
+    api.setSettings({ theme: t }).catch(() => {});
+  }
+
+  async function addAttachmentFromFile(file) {
+    if (!file) return;
+    const buf = await file.arrayBuffer();
+    const b64 = btoa(
+      new Uint8Array(buf).reduce((s, byte) => s + String.fromCharCode(byte), "")
+    );
+    const res = await api.saveAttachmentBase64({
+      name: file.name || "paste.bin",
+      mimeType: file.type || "application/octet-stream",
+      base64: b64,
+      kind: (file.type || "").startsWith("image/") ? "image" : "file",
+    });
+    if (!res.ok) {
+      showToast(res.error || "Attach failed", "error");
+      return;
+    }
+    attachments.push(res);
+    renderAttachChips();
+  }
+
+  async function addAttachmentFromPath(p) {
+    const res = await api.importAttachmentPath(p);
+    if (!res.ok) {
+      showToast(res.error || "Import failed", "error");
+      return;
+    }
+    attachments.push(res);
+    renderAttachChips();
+  }
+
+  async function sendMessage(prefill) {
+    const text = (prefill != null ? prefill : el.input.value).trim();
+    if (!text && !attachments.length) return;
+
+    const atts = attachments.slice();
+
+    // Agent busy → kolejka. Dopowiedzenie = doklej do tej samej pozycji (nie nowa tura).
+    if (busy) {
+      const piece = text || "(załącznik)";
+      const lastQ = messageQueue[messageQueue.length - 1];
+      const lastMsg = lastAll();
+      if (lastQ && (!atts.length || !(lastQ.attachments || []).length)) {
+        // scal tekst + ewent. załączniki
+        if (piece && piece !== "(załącznik)") {
+          lastQ.text =
+            lastQ.text && lastQ.text !== "(załącznik)"
+              ? `${lastQ.text}\n${piece}`
+              : piece;
+        }
+        if (atts.length) {
+          lastQ.attachments = (lastQ.attachments || []).concat(atts);
+        }
+        if (lastMsg && lastMsg.role === "user" && lastMsg._queued) {
+          lastMsg.text = lastQ.text;
+          lastMsg.attachments = lastQ.attachments || [];
+        }
+        showToast("Doklejone do kolejki (1 wiadomość)", "ok");
+      } else {
+        messageQueue.push({ text: piece, attachments: atts });
+        pushAll({
+          id: `u-q-${Date.now()}`,
+          role: "user",
+          text: piece,
+          tools: [],
+          attachments: atts,
+          _local: true,
+          _queued: true,
+        });
+        showToast(`W kolejce (${messageQueue.length})`, "ok");
+      }
+      if (prefill == null) el.input.value = "";
+      attachments = [];
+      renderAttachChips();
+      autosize();
+      // nie full re-render przy busy — tylko ostatnia bańka (zero skoku scrolla)
+      patchLastUserBubbleFromQueue();
+      updateQueueChip();
+      setStatus(
+        "queued",
+        messageQueue.length === 1
+          ? "W kolejce — wyślę jednym strzałem po tej odpowiedzi"
+          : `W kolejce (${messageQueue.length}) — scalę przed wysyłką`
+      );
+      el.input.focus();
+      return;
+    }
+
+    await runSendTurn(text || "(załącznik)", atts, prefill == null);
+  }
+
+  async function runSendTurn(text, atts, clearInput) {
+    const cwd = selectedRow()?.cwd || defaultCwd;
+    const sessionId = liveSessionId || selectedId || null;
+
+    // Jeśli to nie z kolejki, dodaj bubble user (kolejka już dodała)
+    const last = lastAll();
+    const alreadyShown =
+      last &&
+      last.role === "user" &&
+      last._queued &&
+      cleanUserText(last.text) === cleanUserText(text);
+    if (!alreadyShown) {
+      const showText = text && text !== "(załącznik)" ? text : "";
+      // Nie twórz pustej bańki przy samym załączniku bez tekstu
+      if (showText || (atts && atts.length)) {
+        pushAll({
+          id: `u-local-${Date.now()}`,
+          role: "user",
+          text: showText,
+          tools: [],
+          attachments: atts || [],
+          _local: true,
+        });
+      }
+    } else if (last) {
+      last._queued = false;
+    }
+
+    streamingAssistant = {
+      id: `stream-${Date.now()}`,
+      role: "assistant",
+      text: "",
+      tools: [],
+      thinking: "",
+      _streaming: true,
+    };
+    pushAll(streamingAssistant);
+    liveTools = [];
+
+    if (clearInput) el.input.value = "";
+    attachments = [];
+    renderAttachChips();
+    autosize();
+    renderMessages();
+    renderActivity();
+    setBusy(true);
+    setStatus("thinking", mode === "home" ? "Myślę…" : "Agent startuje…");
+    el.input.focus();
+
+    const res = await api.chatSend({
+      text: text === "(załącznik)" ? "" : text,
+      sessionId,
+      cwd,
+      mode,
+      attachments: atts || [],
+      modelId: mode === "home" ? el.modelSelect.value : codeModelId,
+      homeKind: mode === "home" ? homeKind : undefined,
+      aspectRatio:
+        mode === "home"
+          ? document.getElementById("ratio-select")?.value || "1:1"
+          : undefined,
+      effort: mode === "grok" ? effortLevel : undefined,
+    });
+
+    setBusy(false);
+    if (!res.ok) {
+      showToast(res.error || "Send failed", "error");
+      setStatus("error", res.error || "Błąd");
+      el.input.focus();
+      // nadal spróbuj kolejkę
+      await drainQueue();
+      return;
+    }
+
+    liveSessionId = res.sessionId;
+    selectedId = res.sessionId;
+    if (streamingAssistant) streamingAssistant._streaming = false;
+
+    if (mode === "home" && res.assistant) {
+      if (streamingAssistant) {
+        streamingAssistant.text = res.assistant.content || "";
+        streamingAssistant.images = res.assistant.images || [];
+        streamingAssistant._streaming = false;
+      } else {
+        pushAll({
+          id: res.assistant.id,
+          role: "assistant",
+          text: res.assistant.content || "",
+          images: res.assistant.images || [],
+          tools: [],
+        });
+      }
+      renderMessages();
+    }
+
+    if (res.title) {
+      el.wsTitle.textContent = res.title;
+      bag().wsTitle = res.title;
+    }
+    pushBag();
+    persistNav();
+    await refresh();
+    el.input.focus();
+    if (typeof refreshUsage === "function") refreshUsage({ includeRate: false });
+    await drainQueue();
+  }
+
+  function patchLastUserBubbleFromQueue() {
+    const last = lastAll();
+    if (!last || last.role !== "user") {
+      renderMessages({ forceScroll: true });
+      return;
+    }
+    const stick = shouldStickBottom(true);
+    let row = el.messages.lastElementChild;
+    // ostatni może być asystent streaming — szukaj user
+    const rows = el.messages.querySelectorAll(".msg.user");
+    row = rows[rows.length - 1] || null;
+    if (!row) {
+      renderMessages({ forceScroll: true });
+      return;
+    }
+    let content = row.querySelector(".msg-content");
+    const text = cleanUserText(last.text || "");
+    if (text) {
+      if (!content) {
+        content = document.createElement("div");
+        content.className = "msg-content";
+        row.querySelector(".msg-body")?.appendChild(content);
+      }
+      content.textContent = text;
+    }
+    if (stick) scrollChatToBottom(true);
+  }
+
+  /** Zlej całą kolejkę w jedną wiadomość (dopowiedzenia = jedna tura, nie N). */
+  function coalesceQueue() {
+    if (!messageQueue.length) return null;
+    const items = messageQueue.splice(0, messageQueue.length);
+    const texts = [];
+    const atts = [];
+    for (const it of items) {
+      const t = (it.text || "").trim();
+      if (t && t !== "(załącznik)") texts.push(t);
+      if (it.attachments && it.attachments.length) {
+        atts.push(...it.attachments);
+      }
+    }
+    // UI: jedna bańka „w kolejce” (zostaje _queued → runSendTurn nie dubluje)
+    const queuedBubbles = allMessages.filter((m) => m._queued && m.role === "user");
+    if (queuedBubbles.length) {
+      const keep = queuedBubbles[0];
+      keep.text = texts.join("\n") || "(załącznik)";
+      keep.attachments = atts;
+      for (let i = 1; i < queuedBubbles.length; i++) {
+        const id = queuedBubbles[i].id;
+        const idx = allMessages.findIndex((m) => m.id === id);
+        if (idx >= 0) allMessages.splice(idx, 1);
+      }
+      syncVisibleMessages();
+    }
+    return {
+      text: texts.join("\n") || "(załącznik)",
+      attachments: atts,
+    };
+  }
+
+  async function drainQueue() {
+    if (drainingQueue || busy) return;
+    if (!messageQueue.length) {
+      updateQueueChip();
+      return;
+    }
+    drainingQueue = true;
+    updateQueueChip();
+    setStatus("queued", "Kolejka → jedna wiadomość…");
+    const merged = coalesceQueue();
+    updateQueueChip();
+    if (merged) {
+      await runSendTurn(merged.text, merged.attachments || [], false);
+    }
+    // gdy w trakcie tury znów coś wpadło do kolejki
+    while (messageQueue.length && !busy) {
+      const again = coalesceQueue();
+      updateQueueChip();
+      if (!again) break;
+      setStatus("queued", "Kolejka → jedna wiadomość…");
+      await runSendTurn(again.text, again.attachments || [], false);
+    }
+    drainingQueue = false;
+    updateQueueChip();
+  }
+
+  async function newChat() {
+    selectedId = null;
+    liveSessionId = null;
+    allMessages = [];
+    messages = [];
+    streamingAssistant = null;
+    liveTools = [];
+    visibleCount = PAGE;
+    attachments = [];
+    messageQueue = [];
+    bag().wsTitle = "New chat";
+    renderAttachChips();
+    el.wsTitle.textContent = "New chat";
+    updatePathChips(mode === "home" ? "" : defaultCwd);
+    renderMessages({ forceScroll: true });
+    renderList();
+    renderActivity();
+    el.input.focus();
+
+    if (mode === "home") {
+      const res = await api.chatNew({ mode: "home" });
+      if (res.ok) {
+        liveSessionId = res.sessionId;
+        selectedId = res.sessionId;
+        await refresh();
+      }
+    }
+    pushBag();
+    persistNav();
+    showToast(mode === "home" ? "Nowy czat Home" : "Nowa sesja Build — pisz poniżej", "ok");
+  }
+
+  function autosize() {
+    const ta = el.input;
+    preserveChatScroll(() => {
+      ta.style.height = "auto";
+      ta.style.height = Math.min(200, ta.scrollHeight) + "px";
+    });
+  }
+
+  function showCtx(x, y, id) {
+    ctxTargetId = id;
+    el.ctxMenu.classList.remove("hidden");
+    el.ctxMenu.style.left = Math.min(x, window.innerWidth - 200) + "px";
+    el.ctxMenu.style.top = Math.min(y, window.innerHeight - 160) + "px";
+  }
+
+  function hideCtx() {
+    el.ctxMenu.classList.add("hidden");
+    ctxTargetId = null;
+  }
+
+  async function ctxAction(act) {
+    const id = ctxTargetId || selectedId;
+    hideCtx();
+
+    if (act === "new") {
+      await newChat();
+      return;
+    }
+    if (act === "theme-dark") {
+      applyTheme("dark");
+      showToast("Theme: Dark", "ok");
+      return;
+    }
+    if (act === "theme-light") {
+      applyTheme("light");
+      showToast("Theme: Light", "ok");
+      return;
+    }
+    if (act === "theme-auto") {
+      applyTheme("auto");
+      showToast("Theme: Auto", "ok");
+      return;
+    }
+    if (act === "settings") {
+      document.getElementById("btn-settings").click();
+      return;
+    }
+
+    if (!id) {
+      showToast("Wybierz czat z listy (albo New chat)", "");
+      return;
+    }
+    const row = rowsForMode().find((r) => r.id === id);
+    if (!row && act !== "copy") {
+      showToast("Sesja nie znaleziona", "error");
+      return;
+    }
+
+    if (act === "copy") {
+      await navigator.clipboard.writeText(id);
+      showToast("ID skopiowane", "ok");
+      return;
+    }
+    if (act === "reveal") {
+      if (mode === "home") {
+        showToast("Home chats: ~/Library/Application Support/grok-sessions/home-chats", "");
+        return;
+      }
+      const res = await api.revealSession(row.dirPath);
+      if (!res.ok) showToast(res.error, "error");
+      return;
+    }
+    if (act === "delete") {
+      const ok = await modalPrompt({
+        title: "Delete chat?",
+        body: `${row.title}\n\nPermanent.`,
+        okLabel: "Delete",
+      });
+      if (!ok) return;
+      const res = await api.deleteSession({ id, mode });
+      if (!res.ok) showToast(res.error, "error");
+      else {
+        if (selectedId === id) {
+          selectedId = null;
+          liveSessionId = null;
+          allMessages = [];
+          messages = [];
+          el.wsTitle.textContent = "New chat";
+          renderMessages({ forceScroll: true });
+        }
+        pushBag();
+        persistNav();
+        await refresh();
+      }
+      return;
+    }
+    if (act === "rename") {
+      const name = await modalPrompt({
+        title: "Rename",
+        body: "Tytuł na liście",
+        okLabel: "Save",
+        inputValue: row.title,
+      });
+      if (name == null || !String(name).trim()) return;
+      const res = await api.renameSession({
+        id,
+        title: String(name).trim(),
+        mode,
+      });
+      if (!res.ok) showToast(res.error || "Rename failed", "error");
+      else {
+        if (selectedId === id) el.wsTitle.textContent = String(name).trim();
+        await refresh();
+      }
+    }
+  }
+
+  // ===== Events =====
+  el.tabHome.onclick = () => setMode("home");
+  el.tabGrok.onclick = () => setMode("grok");
+  el.btnNew.onclick = () => newChat();
+
+  // Home Chat / Image / Video
+  document.getElementById("home-kind")?.addEventListener("click", (e) => {
+    const btn = e.target.closest(".seg-btn");
+    if (!btn) return;
+    homeKind = btn.dataset.kind || "chat";
+    document
+      .querySelectorAll("#home-kind .seg-btn")
+      .forEach((b) => b.classList.toggle("active", b === btn));
+    const ratioWrap = document.getElementById("ratio-wrap");
+    if (ratioWrap) {
+      ratioWrap.classList.toggle("hidden", homeKind === "chat");
+    }
+    if (homeKind === "image") {
+      el.input.placeholder = "Opisz grafikę… (proporcje po prawej)";
+    } else if (homeKind === "video") {
+      el.input.placeholder = "Opisz wideo… (jeśli API niedostępne → storyboard)";
+    } else {
+      el.input.placeholder =
+        "Message Grok… (Enter = send, ⌘V = wklej screenshot)";
+    }
+  });
+
+  document.getElementById("effort-select")?.addEventListener("change", async (e) => {
+    effortLevel = e.target.value || "high";
+    const res = await api.chatSetEffort(effortLevel);
+    if (!res.ok) showToast(res.error || "Effort failed", "error");
+    else showToast(`Effort: ${effortLevel}`, "ok");
+  });
+  el.form.onsubmit = (e) => {
+    e.preventDefault();
+    sendMessage();
+  };
+  el.input.addEventListener("input", autosize);
+  el.input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+  el.filter.addEventListener("input", (e) => {
+    filter = e.target.value || "";
+    renderList();
+  });
+  el.btnStop.onclick = async () => {
+    const res = await api.chatStop();
+    setBusy(false);
+    if (!res.ok) showToast(res.error || "Stop failed", "error");
+    else showToast("Stopped", "ok");
+  };
+  el.modelSelect.addEventListener("change", async () => {
+    const id = el.modelSelect.value;
+    if (mode === "home") homeModelId = id;
+    else codeModelId = id;
+    const res = await api.chatSetModel({ modelId: id, mode });
+    if (!res.ok) showToast(res.error || "Model change failed", "error");
+  });
+  el.btnToggleActivity.onclick = () => {
+    showActivity = !showActivity;
+    renderActivity();
+  };
+
+  document.getElementById("suggestions").onclick = (e) => {
+    const btn = e.target.closest(".suggest");
+    if (!btn) return;
+    sendMessage(btn.dataset.text);
+  };
+
+  document.getElementById("btn-collapse").onclick = () => {
+    // Tylko lewy panel — workspace/czat ZOSTAJE
+    el.app.classList.add("rail-collapsed");
+    el.btnExpand.classList.remove("hidden");
+  };
+  el.btnExpand.onclick = () => {
+    el.app.classList.remove("rail-collapsed");
+    el.btnExpand.classList.add("hidden");
+  };
+
+  document.getElementById("btn-session-menu").onclick = (e) => {
+    e.stopPropagation();
+    // Menu ⋯ działa zawsze (temat, new chat, settings) — nawet bez wybranej sesji
+    const r = e.currentTarget.getBoundingClientRect();
+    showCtx(r.left, r.bottom + 4, selectedId || liveSessionId || null);
+  };
+
+  el.ctxMenu.onclick = (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (btn) ctxAction(btn.dataset.act);
+  };
+  document.addEventListener("click", (e) => {
+    if (!el.ctxMenu.contains(e.target) && e.target.id !== "btn-session-menu") {
+      hideCtx();
+    }
+  });
+
+  document.getElementById("btn-attach").onclick = async () => {
+    const files = await api.pickFiles();
+    for (const f of files) {
+      if (f.ok) attachments.push(f);
+    }
+    renderAttachChips();
+    el.input.focus();
+  };
+
+  // Paste images
+  el.input.addEventListener("paste", async (e) => {
+    const items = e.clipboardData && e.clipboardData.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type && item.type.startsWith("image/")) {
+        e.preventDefault();
+        const file = item.getAsFile();
+        await addAttachmentFromFile(file);
+      }
+    }
+  });
+
+  // Drag & drop
+  let dragDepth = 0;
+  window.addEventListener("dragenter", (e) => {
+    e.preventDefault();
+    dragDepth++;
+    el.dropOverlay.classList.remove("hidden");
+  });
+  window.addEventListener("dragleave", (e) => {
+    e.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) el.dropOverlay.classList.add("hidden");
+  });
+  window.addEventListener("dragover", (e) => {
+    e.preventDefault();
+  });
+  window.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    el.dropOverlay.classList.add("hidden");
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (files && files.length) {
+      for (const f of files) {
+        // Electron may expose path
+        if (f.path) await addAttachmentFromPath(f.path);
+        else await addAttachmentFromFile(f);
+      }
+    }
+  });
+
+  document.getElementById("btn-settings").onclick = async () => {
+    const s = await api.getSettings();
+    document.getElementById("set-grok-path").value = s.grokPath || "";
+    document.getElementById("set-cwd").value = s.defaultCwd || "";
+    document.getElementById("set-subagents").checked = Boolean(s.showSubagents);
+    el.settingsModal.classList.remove("hidden");
+  };
+  document.getElementById("set-cancel").onclick = () =>
+    el.settingsModal.classList.add("hidden");
+  document.getElementById("set-pick-grok").onclick = async () => {
+    const p = await api.pickGrokBinary();
+    if (p) document.getElementById("set-grok-path").value = p;
+  };
+  document.getElementById("set-login").onclick = async () => {
+    const res = await api.login();
+    if (!res.ok) showToast(res.error || "login fail", "error");
+    else showToast("Login opened in Terminal", "ok");
+  };
+  document.getElementById("set-save").onclick = async () => {
+    await api.setSettings({
+      grokPath: document.getElementById("set-grok-path").value.trim(),
+      defaultCwd: document.getElementById("set-cwd").value.trim(),
+      showSubagents: document.getElementById("set-subagents").checked,
+    });
+    el.settingsModal.classList.add("hidden");
+    showToast("Saved", "ok");
+    await refresh();
+  };
+
+  document.getElementById("btn-account").onclick = async () => {
+    const acc = await api.getAccount();
+    applyAccount(acc);
+    el.accountModal.classList.remove("hidden");
+  };
+  document.getElementById("account-close").onclick = () =>
+    el.accountModal.classList.add("hidden");
+  document.getElementById("account-login").onclick = async () => {
+    const res = await api.login();
+    if (!res.ok) showToast(res.error || "login fail", "error");
+    else showToast("Login opened", "ok");
+  };
+
+  window.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
+      e.preventDefault();
+      newChat();
+    }
+  });
+
+  api.onUpdated(applyPayload);
+  api.onChatUpdate(handleChatUpdate);
+  api.onChatBusy(({ busy: b, sessionId }) => {
+    if (b) {
+      busySessionId =
+        sessionId || liveSessionId || selectedId || busySessionId || null;
+      bags.grok.busy = true;
+    } else {
+      busySessionId = null;
+      bags.grok.busy = false;
+    }
+    setBusy(b, mode === "home" ? "grok" : mode);
+    if (mode === "home") {
+      // UI Home bez chipa Working z Build
+      el.busyChip.classList.add("hidden");
+    }
+    if (mode === "grok") renderList();
+  });
+  api.onChatError(({ message }) => {
+    const msg = cleanUserText(message || "Error") || "Error";
+    if (/\[Attachments/i.test(message || "")) return;
+    // błędy Code nie spamują Home
+    if (mode === "home" && /agent|session\/|ACP/i.test(msg)) {
+      bags.grok.statusPhase = "error";
+      bags.grok.statusDetail = msg.slice(0, 120);
+      return;
+    }
+    showToast(msg.slice(0, 200), "error");
+    setStatus("error", msg.slice(0, 120));
+  });
+  api.onChatModels(() => {
+    if (mode === "grok") refresh();
+  });
+  api.onChatStatus(({ phase, detail }) => {
+    // status z main: przypisz do trybu, z którego leci send
+    // Home send i Code send oba wołają status — trzymamy na aktywnym mode w momencie send
+    setStatus(phase, detail, mode);
+  });
+
+  async function boot() {
+    const data = await api.list();
+    applyPayload(data);
+    if (data.settings?.theme) applyTheme(data.settings.theme);
+
+    const lastMode =
+      data.settings?.lastMode === "grok" ? "grok" : "home";
+    const lastHome = data.settings?.lastHomeSessionId || "";
+    const lastCode = data.settings?.lastCodeSessionId || "";
+
+    bags.home.selectedId = lastHome || null;
+    bags.home.liveSessionId = lastHome || null;
+    bags.grok.selectedId = lastCode || null;
+    bags.grok.liveSessionId = lastCode || null;
+
+    setMode(lastMode, { restoreSession: false });
+    pullBag();
+
+    const wantId = mode === "home" ? lastHome : lastCode;
+    if (wantId) {
+      const row = rowsForMode().find((r) => r.id === wantId);
+      if (row) await openSession(row);
+    }
+    bootDone = true;
+    el.input.focus();
+  }
+
+  /* ===== Usage panel (context % like Claude) ===== */
+  const usageEls = {
+    btn: document.getElementById("btn-usage"),
+    pct: document.getElementById("usage-btn-pct"),
+    pop: document.getElementById("usage-popover"),
+    weeklyLabel: document.getElementById("usage-weekly-label"),
+    weeklyMeta: document.getElementById("usage-weekly-meta"),
+    weeklyBar: document.getElementById("usage-weekly-bar"),
+    weeklyDetail: document.getElementById("usage-weekly-detail"),
+    ctxMeta: document.getElementById("usage-ctx-meta"),
+    ctxBar: document.getElementById("usage-ctx-bar"),
+    ctxTokens: document.getElementById("usage-ctx-tokens"),
+    rateMeta: document.getElementById("usage-rate-meta"),
+    rateBar: document.getElementById("usage-rate-bar"),
+    reqMeta: document.getElementById("usage-req-meta"),
+    termMeta: document.getElementById("usage-term-meta"),
+    sessionMeta: document.getElementById("usage-session-meta"),
+    account: document.getElementById("usage-account"),
+  };
+  let usageTimer = null;
+  let usageOpen = false;
+
+  function fmtTokens(n) {
+    if (n == null || !Number.isFinite(Number(n))) return "—";
+    return Number(n).toLocaleString("pl-PL");
+  }
+
+  function setBar(el, pct) {
+    if (!el) return;
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    el.style.width = p + "%";
+    el.classList.toggle("warn", p >= 70 && p < 90);
+    el.classList.toggle("hot", p >= 90);
+  }
+
+  async function refreshUsage(opts = {}) {
+    if (!usageEls.btn || typeof api.getUsage !== "function") return;
+    const sid =
+      mode === "grok"
+        ? liveSessionId || selectedId || null
+        : null;
+    try {
+      const u = await api.getUsage({
+        sessionId: sid,
+        includeRate: opts.includeRate !== false,
+      });
+      if (!u || !u.ok) {
+        usageEls.pct.textContent = "—";
+        return;
+      }
+      // Weekly SuperGrok (plan) — preferred on the button like Claude
+      const plan = u.plan || null;
+      const weekly = plan?.weekly || null;
+      if (usageEls.weeklyLabel) {
+        usageEls.weeklyLabel.textContent = plan?.tierLabel
+          ? `Tygodniowy · ${plan.tierLabel}`
+          : "Tygodniowy limit SuperGrok";
+      }
+      if (weekly && weekly.percent != null) {
+        usageEls.pct.textContent = Math.round(weekly.percent) + "%";
+        usageEls.btn.classList.toggle("warn", weekly.percent >= 70 && weekly.percent < 90);
+        usageEls.btn.classList.toggle("hot", weekly.percent >= 90);
+        if (usageEls.weeklyMeta)
+          usageEls.weeklyMeta.textContent = Math.round(weekly.percent) + "% użyte";
+        setBar(usageEls.weeklyBar, weekly.percent);
+        if (usageEls.weeklyDetail) {
+          const reset = weekly.resetsAt
+            ? `Reset: ${new Date(weekly.resetsAt).toLocaleString("pl-PL")}`
+            : "";
+          usageEls.weeklyDetail.textContent = [weekly.label || "Grok Build", reset]
+            .filter(Boolean)
+            .join(" · ");
+        }
+      } else {
+        // fallback: show context % on button, weekly detail = error / plan
+        if (usageEls.weeklyMeta)
+          usageEls.weeklyMeta.textContent = plan?.tierLabel || "plan";
+        setBar(usageEls.weeklyBar, 0);
+        if (usageEls.weeklyDetail) {
+          usageEls.weeklyDetail.textContent =
+            plan?.weeklyError ||
+            "Pełne % tygodniowe tylko w grok.com (xAI blokuje token Build)";
+        }
+      }
+
+      const pct = u.context?.percent;
+      if (pct != null) {
+        if (!(weekly && weekly.percent != null)) {
+          usageEls.pct.textContent = Math.round(pct) + "%";
+          usageEls.btn.classList.toggle("warn", pct >= 70 && pct < 90);
+          usageEls.btn.classList.toggle("hot", pct >= 90);
+        }
+        usageEls.ctxMeta.textContent = Math.round(pct) + "%";
+        setBar(usageEls.ctxBar, pct);
+      } else {
+        if (!(weekly && weekly.percent != null)) {
+          usageEls.pct.textContent = mode === "home" ? "H" : "—";
+          usageEls.btn.classList.remove("warn", "hot");
+        }
+        usageEls.ctxMeta.textContent =
+          mode === "home" ? "Home (brak signals)" : "—";
+        setBar(usageEls.ctxBar, 0);
+      }
+      const used = u.context?.tokensUsed;
+      const total = u.context?.tokensTotal;
+      usageEls.ctxTokens.textContent =
+        used != null && total != null
+          ? `${fmtTokens(used)} / ${fmtTokens(total)} · tury ${u.context?.turns ?? "—"} · tool ${u.context?.tools ?? "—"}`
+          : mode === "home"
+            ? "Home nie zapisuje context window jak Build"
+            : "Brak signals.json — otwórz sesję Build";
+
+      if (u.rate && u.rate.tokensLimit != null) {
+        const rem = u.rate.tokensRemaining;
+        const lim = u.rate.tokensLimit;
+        const usedPct =
+          lim > 0 && rem != null
+            ? Math.round(((lim - rem) / lim) * 100)
+            : 0;
+        usageEls.rateMeta.textContent =
+          rem != null ? `${fmtTokens(rem)} left` : "—";
+        setBar(usageEls.rateBar, usedPct);
+        usageEls.reqMeta.textContent =
+          u.rate.requestsRemaining != null && u.rate.requestsLimit != null
+            ? `Requesty: ${u.rate.requestsRemaining} / ${u.rate.requestsLimit}`
+            : "—";
+      } else {
+        usageEls.rateMeta.textContent = "n/d";
+        setBar(usageEls.rateBar, 0);
+        usageEls.reqMeta.textContent = "Rate limit: brak odczytu";
+      }
+
+      if (u.terminal?.isActive) {
+        usageEls.termMeta.textContent = `aktywny · pid ${u.terminal.pid || "?"}`;
+        usageEls.termMeta.style.color = "#4ade80";
+      } else {
+        usageEls.termMeta.textContent = "nie w terminalu";
+        usageEls.termMeta.style.color = "";
+      }
+      usageEls.sessionMeta.textContent = sid
+        ? `sesja ${String(sid).slice(0, 8)}… · ${u.context?.model || "—"}`
+        : "brak sesji Build";
+      const planBit = plan?.tierLabel ? ` · ${plan.tierLabel}` : "";
+      usageEls.account.textContent = u.account?.email
+        ? `${u.account.name || ""} · ${u.account.email}${planBit}`.trim()
+        : `konto: —${planBit}`;
+    } catch (err) {
+      usageEls.pct.textContent = "!";
+    }
+  }
+
+  if (usageEls.btn) {
+    usageEls.btn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      usageOpen = !usageOpen;
+      usageEls.pop.classList.toggle("hidden", !usageOpen);
+      if (usageOpen) await refreshUsage({ includeRate: true });
+    });
+    document.addEventListener("click", (e) => {
+      if (!usageOpen) return;
+      const corner = document.querySelector(".usage-corner");
+      if (corner && !corner.contains(e.target)) {
+        usageOpen = false;
+        usageEls.pop.classList.add("hidden");
+      }
+    });
+    usageTimer = setInterval(() => refreshUsage({ includeRate: false }), 15000);
+    refreshUsage({ includeRate: true });
+  }
+
+  boot().catch((err) => {
+    console.error("boot failed", err);
+    setMode("home");
+    refresh();
+  });
+})();

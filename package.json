@@ -1,0 +1,19 @@
+{
+  "name": "grok-sessions",
+  "version": "0.1.0",
+  "description": "Lokalny launcher i lista sesji Grok Build (sidebar + Terminal.app)",
+  "main": "electron/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "verify-sessions": "node scripts/verify-sessions.js",
+    "smoke": "node scripts/e2e-smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}
