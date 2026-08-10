@@ -249,23 +249,42 @@
   function setStatus(phase, detail, forMode, opts = {}) {
     const target = forMode || mode;
     const b = bags[target];
-    // Status streamu tylko gdy oglądamy sesję, która pracuje
-    const sid = opts.sessionId || busySessionId;
+    const streamPhases = [
+      "thinking",
+      "tool",
+      "responding",
+      "session",
+      "starting",
+      "queued",
+    ];
+    const sid = opts.sessionId || busySessionId || null;
+    // TWARDY GATE: status streamu NIGDY na obcej sesji
+    if (
+      mode === "grok" &&
+      streamPhases.includes(phase) &&
+      busySessionId &&
+      selectedId &&
+      selectedId !== busySessionId
+    ) {
+      const buf = ensureSessionStream(busySessionId);
+      if (buf) {
+        buf.statusPhase = phase;
+        buf.statusDetail = detail || "";
+      }
+      return;
+    }
     if (
       sid &&
-      (phase === "thinking" ||
-        phase === "tool" ||
-        phase === "responding" ||
-        phase === "session") &&
+      streamPhases.includes(phase) &&
       mode === "grok" &&
       selectedId &&
-      selectedId !== sid &&
-      liveSessionId !== sid
+      selectedId !== sid
     ) {
-      // zapisz status w buforze sesji, nie w UI
       const buf = ensureSessionStream(sid);
-      buf.statusPhase = phase;
-      buf.statusDetail = detail || "";
+      if (buf) {
+        buf.statusPhase = phase;
+        buf.statusDetail = detail || "";
+      }
       return;
     }
     // Zawsze humanizuj detail (tool titles = kody)
@@ -1094,12 +1113,19 @@
   /** Zapisz live stan Build sesji przed przełączeniem. */
   function snapshotCurrentBuildSession() {
     if (mode !== "grok" || !liveSessionId) return;
+    // Snapshot TYLKO sesji, którą oglądamy — i tylko jeśli to ona pracuje
+    // albo ma własny bufor (nie nadpisuj bufora pracującej A danymi z B)
     const sid = liveSessionId;
+    if (busySessionId && busySessionId !== sid) {
+      // oglądamy B, pracuje A — nie ruszaj bufora A; B bez live streamu
+      return;
+    }
     streamBySession[sid] = {
       allMessages: allMessages.slice(),
       streamingAssistant,
       liveTools: (liveTools || []).slice(),
       messageQueue: (messageQueue || []).slice(),
+      attachments: (attachments || []).slice(),
       statusPhase: bag().statusPhase || "",
       statusDetail: bag().statusDetail || "",
     };
@@ -1107,14 +1133,31 @@
 
   function isViewingSession(sid) {
     if (!sid) return false;
-    return (
-      mode === "grok" && (selectedId === sid || liveSessionId === sid)
-    );
+    // wyłącznie selectedId — liveSessionId bywa mylące przy race
+    return mode === "grok" && selectedId === sid;
+  }
+
+  /** Wyczyść chrome UI (status, kroki, załączniki) — obca sesja. */
+  function clearForeignSessionChrome() {
+    liveTools = [];
+    renderActivity();
+    attachments = [];
+    renderAttachChips();
+    el.statusBar.classList.add("hidden");
+    el.statusText.textContent = "";
+    bag().statusPhase = "";
+    bag().statusDetail = "";
+    showActivity = false;
   }
 
   async function openSession(row, opts = {}) {
-    // Przed zmianą — odłóż stream aktualnej sesji Build
-    if (mode === "grok" && liveSessionId && liveSessionId !== row.id) {
+    // Przed zmianą — odłóż stream TYLKO jeśli odchodzimy z pracującej sesji
+    if (
+      mode === "grok" &&
+      liveSessionId &&
+      liveSessionId !== row.id &&
+      busySessionId === liveSessionId
+    ) {
       snapshotCurrentBuildSession();
     }
 
@@ -1125,25 +1168,23 @@
     updatePathChips(row.cwd);
     renderList();
 
-    // Live stream tej sesji (agent wciąż pracuje) — NIE ładuj pustego transcriptu
+    // Live TYLKO gdy TA sesja jest busySessionId (agent realnie tu pracuje)
     const live = streamBySession[row.id];
-    const hasLiveWork =
-      live &&
-      (busySessionId === row.id ||
-        (live.streamingAssistant && live.streamingAssistant._streaming) ||
-        (live.allMessages && live.allMessages.some((m) => m._streaming)));
+    const hasLiveWork = Boolean(live && busySessionId === row.id);
 
     if (hasLiveWork) {
       allMessages = (live.allMessages || []).slice();
       streamingAssistant = live.streamingAssistant || null;
       liveTools = (live.liveTools || []).slice();
       messageQueue = (live.messageQueue || []).slice();
+      attachments = (live.attachments || []).slice();
       visibleCount = Math.max(PAGE, allMessages.length);
       syncVisibleMessages();
       renderMessages({ forceScroll: true });
       renderActivity();
+      renderAttachChips();
       updateQueueChip();
-      setBusy(busySessionId === row.id || bags.grok.busy, mode);
+      setBusy(true, mode);
       if (live.statusPhase) {
         setStatus(live.statusPhase, live.statusDetail, mode, {
           sessionId: row.id,
@@ -1159,82 +1200,89 @@
       return;
     }
 
-    const reuse =
-      opts.fromSwitch &&
-      allMessages.length > 0 &&
-      (liveSessionId === row.id || selectedId === row.id) &&
-      !opts.forceReload;
+    // Obca sesja (albo bez pracy) — ZAWSZE czysty chrome + transcript
+    streamingAssistant = null;
+    liveTools = [];
+    messageQueue = [];
+    clearForeignSessionChrome();
+    visibleCount = PAGE;
 
-    if (!reuse) {
-      allMessages = [];
-      messages = [];
-      streamingAssistant = null;
-      if (!opts.fromSwitch) liveTools = [];
-      messageQueue = [];
-      visibleCount = PAGE;
-      renderMessages({ forceScroll: true });
-      renderActivity();
+    allMessages = [];
+    messages = [];
+    renderMessages({ forceScroll: true });
+    renderActivity();
 
-      const tr = await api.transcript({
-        id: row.id,
-        dirPath: row.dirPath,
-        mode: mode === "home" ? "home" : "grok",
+    const tr = await api.transcript({
+      id: row.id,
+      dirPath: row.dirPath,
+      mode: mode === "home" ? "home" : "grok",
+    });
+    // race: user could have switched again
+    if (selectedId !== row.id) return;
+
+    if (tr.error) showToast(tr.error, "error");
+    allMessages = (tr.messages || [])
+      .map((m, i) => {
+        const raw = m.text || m.content || "";
+        let text =
+          m.role === "user"
+            ? cleanUserText(raw)
+            : cleanAssistantText(raw);
+        const tools = (m.tools || []).map((t) => ({
+          ...t,
+          title: t.title || "tool",
+        }));
+        return {
+          ...m,
+          id: m.id || `m-${i}`,
+          text:
+            text ||
+            (m.role === "user" && (m.attachments || []).length ? "" : text),
+          tools,
+        };
+      })
+      .filter((m) => {
+        if (
+          m.role === "user" &&
+          !m.text &&
+          !(m.attachments && m.attachments.length) &&
+          !(m.images && m.images.length)
+        ) {
+          return false;
+        }
+        if (
+          m.role === "assistant" &&
+          !m.text &&
+          !(m.tools && m.tools.length) &&
+          !m.thinking &&
+          !(m.images && m.images.length)
+        ) {
+          return false;
+        }
+        return true;
       });
-      if (tr.error) showToast(tr.error, "error");
-      allMessages = (tr.messages || [])
-        .map((m, i) => {
-          const raw = m.text || m.content || "";
-          let text =
-            m.role === "user"
-              ? cleanUserText(raw)
-              : cleanAssistantText(raw);
-          const tools = (m.tools || []).map((t) => ({
-            ...t,
-            title: t.title || "tool",
-          }));
-          return {
-            ...m,
-            id: m.id || `m-${i}`,
-            text:
-              text ||
-              (m.role === "user" && (m.attachments || []).length ? "" : text),
-            tools,
-          };
-        })
-        .filter((m) => {
-          if (
-            m.role === "user" &&
-            !m.text &&
-            !(m.attachments && m.attachments.length) &&
-            !(m.images && m.images.length)
-          ) {
-            return false;
-          }
-          if (
-            m.role === "assistant" &&
-            !m.text &&
-            !(m.tools && m.tools.length) &&
-            !m.thinking &&
-            !(m.images && m.images.length)
-          ) {
-            return false;
-          }
-          return true;
-        });
-      syncVisibleMessages();
-      renderMessages({ forceScroll: true });
-    } else {
-      renderMessages({ forceScroll: true });
-      renderActivity();
-    }
+    // odfiltruj „żywe” śmieci z cudzego streamu (gdyby transcript miał puste thinking shells)
+    allMessages = allMessages.filter(
+      (m) => !(m._streaming && m.role === "assistant" && !m.text)
+    );
+    syncVisibleMessages();
+    renderMessages({ forceScroll: true });
+
     pushBag();
     persistNav();
-    // Working chip tylko gdy TA sesja pracuje
-    setBusy(busySessionId === row.id && bags.grok.busy, mode);
+
+    // Busy globalnie (kolejka) ale UI bez „Myślę” / Working na tej sesji
     if (busySessionId && busySessionId !== row.id && bags.grok.busy) {
-      setBusy(true, mode); // global busy for queue, but chip logic uses viewingBusySession
+      busy = true; // kolejka działa
+      bags.grok.busy = true;
       el.busyChip.classList.add("hidden");
-      setStatus("tool", "Agent w innej sesji…", mode);
+      el.btnStop.classList.remove("hidden");
+      el.btnSend.classList.add("queue-mode");
+      el.input.placeholder = "Agent pracuje w innej sesji Build…";
+      el.statusBar.classList.add("hidden");
+    } else {
+      setBusy(false, mode);
+      el.statusBar.classList.add("hidden");
     }
     el.input.focus();
     if (typeof refreshUsage === "function") refreshUsage({ includeRate: false });
@@ -1368,12 +1416,24 @@
   /** Stream do bufora sesji (UI jest na innej sesji / Home). */
   function applyStreamOffscreen(sid, params) {
     if (!sid) return;
+    // nie pisz do bufora obcej sesji niż busy
+    if (busySessionId && sid !== busySessionId) return;
     const buf = ensureSessionStream(sid);
     const update = params.update || params;
     const kind = update.sessionUpdate;
     if (!kind) return;
     const ensure = () => {
-      if (buf.streamingAssistant) return buf.streamingAssistant;
+      if (buf.streamingAssistant && buf.streamingAssistant._streaming) {
+        return buf.streamingAssistant;
+      }
+      // reuse last streaming shell in buffer messages
+      for (let i = buf.allMessages.length - 1; i >= 0; i--) {
+        const m = buf.allMessages[i];
+        if (m.role === "assistant" && m._streaming) {
+          buf.streamingAssistant = m;
+          return m;
+        }
+      }
       buf.streamingAssistant = {
         id: `stream-${Date.now()}`,
         role: "assistant",
@@ -1424,22 +1484,21 @@
   }
 
   function handleChatUpdate(params) {
-    const sid =
-      (params && params.sessionId) || busySessionId || liveSessionId || null;
-
-    // Home UI — stream Build tylko do bufora / bags.grok, nie do czatu Home
-    if (mode === "home") {
-      if (sid) applyStreamOffscreen(sid, params);
-      else applyCodeStreamInBackground(params);
+    // NIGDY nie fallbackuj na liveSessionId/selectedId — to wlewało stream w obcą sesję
+    const sid = (params && params.sessionId) || busySessionId || null;
+    if (!sid) {
+      // nieoznaczony stream — tylko do offscreen busySession jeśli znamy
+      if (busySessionId) applyStreamOffscreen(busySessionId, params);
       return;
     }
 
-    // Build UI, ale OGLĄDAMY INNĄ sesję niż ta ze streamu
-    if (sid && !isViewingSession(sid)) {
+    // Home albo obca sesja Build — zero zapisu do bieżącego allMessages/DOM
+    if (mode === "home" || !isViewingSession(sid)) {
       applyStreamOffscreen(sid, params);
       return;
     }
 
+    // oglądamy dokładnie sid — OK
     const update = params.update || params;
     const kind = update.sessionUpdate;
     if (!kind) return;
@@ -2589,53 +2648,85 @@
   api.onChatBusy(({ busy: b, sessionId }) => {
     if (b) {
       busySessionId =
-        sessionId || liveSessionId || selectedId || busySessionId || null;
+        sessionId || busySessionId || null;
+      // nie bierz selectedId jako busy — to była dziura
+      if (!busySessionId && mode === "grok") {
+        busySessionId = liveSessionId || selectedId || null;
+      }
       bags.grok.busy = true;
-      if (busySessionId) snapshotCurrentBuildSession();
+      if (busySessionId && isViewingSession(busySessionId)) {
+        snapshotCurrentBuildSession();
+      }
     } else {
       if (busySessionId) {
         const buf = streamBySession[busySessionId];
-        if (buf && buf.streamingAssistant) buf.streamingAssistant._streaming = false;
+        if (buf && buf.streamingAssistant) {
+          buf.streamingAssistant._streaming = false;
+        }
       }
       busySessionId = null;
       bags.grok.busy = false;
     }
-    // UI busy/status tylko gdy oglądamy pracującą sesję (albo Home z globalnym busy)
-    const viewingWork =
-      !b ||
-      !sessionId ||
-      isViewingSession(sessionId) ||
-      isViewingSession(busySessionId);
+    const viewingWork = b && busySessionId && isViewingSession(busySessionId);
     if (mode === "home") {
       bags.grok.busy = Boolean(b);
       el.busyChip.classList.add("hidden");
+      el.statusBar.classList.add("hidden");
+      renderList();
       return;
     }
-    setBusy(b && viewingWork ? b : b, mode);
-    if (b && !viewingWork) {
+    if (viewingWork) {
+      setBusy(true, mode);
+    } else if (b) {
+      // pracuje indziej — kolejka OK, zero statusu Myślę
+      busy = true;
+      bags.grok.busy = true;
       el.busyChip.classList.add("hidden");
+      el.btnStop.classList.remove("hidden");
+      el.btnSend.classList.add("queue-mode");
+      el.input.placeholder = "Agent pracuje w innej sesji Build…";
+      el.statusBar.classList.add("hidden");
+      el.statusText.textContent = "";
+      liveTools = [];
+      renderActivity();
+    } else {
+      setBusy(false, mode);
       el.statusBar.classList.add("hidden");
     }
     renderList();
   });
-  api.onChatError(({ message }) => {
+  api.onChatError(({ message, sessionId }) => {
     const msg = cleanUserText(message || "Error") || "Error";
     if (/\[Attachments/i.test(message || "")) return;
-    // błędy Code nie spamują Home
-    if (mode === "home" && /agent|session\/|ACP/i.test(msg)) {
-      bags.grok.statusPhase = "error";
-      bags.grok.statusDetail = msg.slice(0, 120);
+    const sid = sessionId || busySessionId;
+    if (mode === "home" || (sid && !isViewingSession(sid))) {
+      if (sid) {
+        const buf = ensureSessionStream(sid);
+        if (buf) {
+          buf.statusPhase = "error";
+          buf.statusDetail = msg.slice(0, 120);
+        }
+      }
       return;
     }
     showToast(msg.slice(0, 200), "error");
-    setStatus("error", msg.slice(0, 120));
+    setStatus("error", msg.slice(0, 120), mode, { sessionId: sid });
   });
   api.onChatModels(() => {
     if (mode === "grok") refresh();
   });
   api.onChatStatus(({ phase, detail, sessionId }) => {
-    const sid = sessionId || busySessionId;
-    // nie pokazuj „Myślę/Piszę” na innej sesji niż ta, która pracuje
+    const sid = sessionId || busySessionId || null;
+    // zero statusu na obcej sesji
+    if (mode === "grok" && busySessionId && selectedId !== busySessionId) {
+      const buf = ensureSessionStream(busySessionId);
+      if (buf) {
+        buf.statusPhase = phase;
+        buf.statusDetail = detail || "";
+      }
+      el.statusBar.classList.add("hidden");
+      return;
+    }
     if (sid && mode === "grok" && !isViewingSession(sid)) {
       const buf = ensureSessionStream(sid);
       if (buf) {

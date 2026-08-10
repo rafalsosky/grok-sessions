@@ -728,9 +728,61 @@ select {
 }
 
 .msg-content h3,
-.msg-content h4 {
-  margin: 0.9em 0 0.4em;
+.msg-content h4,
+.msg-content h5,
+.msg-content .md-h {
+  margin: 1em 0 0.45em;
   font-size: 1.05em;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.35;
+  color: var(--text-100);
+}
+
+.msg-content .md-h:first-child {
+  margin-top: 0;
+}
+
+.msg-content .md-ul,
+.msg-content .md-ol {
+  margin: 0.45em 0 0.9em;
+  padding-left: 1.35em;
+}
+
+.msg-content .md-ul li,
+.msg-content .md-ol li {
+  margin: 0.35em 0;
+  line-height: 1.5;
+}
+
+.msg-content .md-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.75em 0 1em;
+  font-size: 13.5px;
+}
+
+.msg-content .md-table th,
+.msg-content .md-table td {
+  border: 1px solid var(--border);
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.msg-content .md-table th {
+  background: rgba(255, 255, 255, 0.04);
+  font-weight: 650;
+}
+
+.msg-content .md-hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
+
+.msg-content p + p {
+  margin-top: 0.65em;
 }
 
 .md-inline {
