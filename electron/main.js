@@ -57,7 +57,7 @@ function createWindow() {
     height: 820,
     minWidth: 900,
     minHeight: 600,
-    title: "Grok Sessions",
+    title: "SuperGrok Desktop SoskyApp",
     backgroundColor: "#262624",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 14, y: 14 },
@@ -216,10 +216,18 @@ async function ensureAcp() {
       reasoningEffort: settings.effort || "high",
     });
     acp.on("update", (params) => {
-      send("chat:update", params);
+      // Zawsze taguj sesją ACP — UI nie może pisać do „aktualnie otwartej”
+      const sid =
+        (params && (params.sessionId || params.session_id)) ||
+        acp.sessionId ||
+        null;
+      send("chat:update", Object.assign({}, params, { sessionId: sid }));
     });
     acp.on("error", (err) => {
-      send("chat:error", { message: err.message });
+      send("chat:error", {
+        message: err.message,
+        sessionId: acp ? acp.sessionId : null,
+      });
     });
     acp.on("exit", (code) => {
       send("chat:agent-exit", { code });
@@ -234,7 +242,12 @@ async function ensureAcp() {
 }
 
 function status(phase, detail) {
-  send("chat:status", { phase, detail: detail || "", at: Date.now() });
+  send("chat:status", {
+    phase,
+    detail: detail || "",
+    at: Date.now(),
+    sessionId: acp ? acp.sessionId : null,
+  });
 }
 
 async function sendHomeChat({

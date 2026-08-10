@@ -29,6 +29,11 @@
   let busySessionId = null;
   /** { [sessionId]: { unread, pinned } } */
   let sessionFlagMap = {};
+  /**
+   * Live stream per Build session — gdy user przełącza listę, stream NIE trafia do innej sesji.
+   * { [sessionId]: { allMessages, streamingAssistant, liveTools, messageQueue, statusPhase, statusDetail } }
+   */
+  const streamBySession = Object.create(null);
 
   /** Osobny stan UI dla Home i Code — zero mieszania. */
   function emptyBag() {
@@ -241,9 +246,28 @@
     return one.length < s.replace(/\s+/g, " ").length ? one + "…" : one;
   }
 
-  function setStatus(phase, detail, forMode) {
+  function setStatus(phase, detail, forMode, opts = {}) {
     const target = forMode || mode;
     const b = bags[target];
+    // Status streamu tylko gdy oglądamy sesję, która pracuje
+    const sid = opts.sessionId || busySessionId;
+    if (
+      sid &&
+      (phase === "thinking" ||
+        phase === "tool" ||
+        phase === "responding" ||
+        phase === "session") &&
+      mode === "grok" &&
+      selectedId &&
+      selectedId !== sid &&
+      liveSessionId !== sid
+    ) {
+      // zapisz status w buforze sesji, nie w UI
+      const buf = ensureSessionStream(sid);
+      buf.statusPhase = phase;
+      buf.statusDetail = detail || "";
+      return;
+    }
     // Zawsze humanizuj detail (tool titles = kody)
     let safeDetail = detail || "";
     if (phase === "tool" || /^Execute\b/i.test(safeDetail) || safeDetail.length > 100) {
@@ -1052,7 +1076,48 @@
     applyPayload(await api.list());
   }
 
+  function ensureSessionStream(sid) {
+    if (!sid) return null;
+    if (!streamBySession[sid]) {
+      streamBySession[sid] = {
+        allMessages: [],
+        streamingAssistant: null,
+        liveTools: [],
+        messageQueue: [],
+        statusPhase: "",
+        statusDetail: "",
+      };
+    }
+    return streamBySession[sid];
+  }
+
+  /** Zapisz live stan Build sesji przed przełączeniem. */
+  function snapshotCurrentBuildSession() {
+    if (mode !== "grok" || !liveSessionId) return;
+    const sid = liveSessionId;
+    streamBySession[sid] = {
+      allMessages: allMessages.slice(),
+      streamingAssistant,
+      liveTools: (liveTools || []).slice(),
+      messageQueue: (messageQueue || []).slice(),
+      statusPhase: bag().statusPhase || "",
+      statusDetail: bag().statusDetail || "",
+    };
+  }
+
+  function isViewingSession(sid) {
+    if (!sid) return false;
+    return (
+      mode === "grok" && (selectedId === sid || liveSessionId === sid)
+    );
+  }
+
   async function openSession(row, opts = {}) {
+    // Przed zmianą — odłóż stream aktualnej sesji Build
+    if (mode === "grok" && liveSessionId && liveSessionId !== row.id) {
+      snapshotCurrentBuildSession();
+    }
+
     selectedId = row.id;
     liveSessionId = row.id;
     el.wsTitle.textContent = row.title;
@@ -1060,16 +1125,52 @@
     updatePathChips(row.cwd);
     renderList();
 
+    // Live stream tej sesji (agent wciąż pracuje) — NIE ładuj pustego transcriptu
+    const live = streamBySession[row.id];
+    const hasLiveWork =
+      live &&
+      (busySessionId === row.id ||
+        (live.streamingAssistant && live.streamingAssistant._streaming) ||
+        (live.allMessages && live.allMessages.some((m) => m._streaming)));
+
+    if (hasLiveWork) {
+      allMessages = (live.allMessages || []).slice();
+      streamingAssistant = live.streamingAssistant || null;
+      liveTools = (live.liveTools || []).slice();
+      messageQueue = (live.messageQueue || []).slice();
+      visibleCount = Math.max(PAGE, allMessages.length);
+      syncVisibleMessages();
+      renderMessages({ forceScroll: true });
+      renderActivity();
+      updateQueueChip();
+      setBusy(busySessionId === row.id || bags.grok.busy, mode);
+      if (live.statusPhase) {
+        setStatus(live.statusPhase, live.statusDetail, mode, {
+          sessionId: row.id,
+        });
+      }
+      pushBag();
+      persistNav();
+      try {
+        el.input.focus({ preventScroll: true });
+      } catch {
+        el.input.focus();
+      }
+      return;
+    }
+
     const reuse =
       opts.fromSwitch &&
       allMessages.length > 0 &&
-      (liveSessionId === row.id || selectedId === row.id);
+      (liveSessionId === row.id || selectedId === row.id) &&
+      !opts.forceReload;
 
     if (!reuse) {
       allMessages = [];
       messages = [];
       streamingAssistant = null;
       if (!opts.fromSwitch) liveTools = [];
+      messageQueue = [];
       visibleCount = PAGE;
       renderMessages({ forceScroll: true });
       renderActivity();
@@ -1087,7 +1188,6 @@
             m.role === "user"
               ? cleanUserText(raw)
               : cleanAssistantText(raw);
-          // humanizuj tytuły tooli z historii (bez raw Execute w pillach)
           const tools = (m.tools || []).map((t) => ({
             ...t,
             title: t.title || "tool",
@@ -1110,7 +1210,6 @@
           ) {
             return false;
           }
-          // puste bańki asystenta bez tooli/thinking — śmieci
           if (
             m.role === "assistant" &&
             !m.text &&
@@ -1130,8 +1229,13 @@
     }
     pushBag();
     persistNav();
-    // po przełączeniu sesji — chip Working tylko jeśli to ta pracująca
-    setBusy(busy, mode);
+    // Working chip tylko gdy TA sesja pracuje
+    setBusy(busySessionId === row.id && bags.grok.busy, mode);
+    if (busySessionId && busySessionId !== row.id && bags.grok.busy) {
+      setBusy(true, mode); // global busy for queue, but chip logic uses viewingBusySession
+      el.busyChip.classList.add("hidden");
+      setStatus("tool", "Agent w innej sesji…", mode);
+    }
     el.input.focus();
     if (typeof refreshUsage === "function") refreshUsage({ includeRate: false });
   }
@@ -1261,58 +1365,116 @@
     bag().allMessages = allMessages;
   }
 
+  /** Stream do bufora sesji (UI jest na innej sesji / Home). */
+  function applyStreamOffscreen(sid, params) {
+    if (!sid) return;
+    const buf = ensureSessionStream(sid);
+    const update = params.update || params;
+    const kind = update.sessionUpdate;
+    if (!kind) return;
+    const ensure = () => {
+      if (buf.streamingAssistant) return buf.streamingAssistant;
+      buf.streamingAssistant = {
+        id: `stream-${Date.now()}`,
+        role: "assistant",
+        text: "",
+        tools: [],
+        thinking: "",
+        _streaming: true,
+      };
+      buf.allMessages.push(buf.streamingAssistant);
+      return buf.streamingAssistant;
+    };
+    if (kind === "user_message_chunk") return;
+    if (kind === "agent_message_chunk") {
+      const chunk = (update.content && update.content.text) || "";
+      if (isToolEchoText(chunk) || isAttachmentJunkOnly(chunk)) return;
+      const a = ensure();
+      a.text += chunk;
+      a.text = cleanAssistantText(a.text);
+      buf.statusPhase = "responding";
+      buf.statusDetail = "Piszę…";
+    } else if (kind === "agent_thought_chunk") {
+      ensure().thinking += (update.content && update.content.text) || "";
+      buf.statusPhase = "thinking";
+      buf.statusDetail = "Myślę…";
+    } else if (kind === "tool_call") {
+      const a = ensure();
+      const tool = {
+        id: update.toolCallId || `t-${a.tools.length}`,
+        title: update.title || update.tool || "tool",
+        status: update.status || "pending",
+      };
+      a.tools.push(tool);
+      buf.liveTools.push({ ...tool });
+      buf.statusPhase = "tool";
+      buf.statusDetail = humanizeToolTitle(tool.title);
+    } else if (kind === "tool_call_update") {
+      const a = ensure();
+      const id = update.toolCallId;
+      const tool =
+        a.tools.find((t) => t.id === id) || a.tools[a.tools.length - 1];
+      if (tool && update.status) tool.status = update.status;
+      if (tool && update.title) tool.title = update.title;
+      const lt =
+        buf.liveTools.find((t) => t.id === id) ||
+        buf.liveTools[buf.liveTools.length - 1];
+      if (lt && update.status) lt.status = update.status;
+    }
+  }
+
   function handleChatUpdate(params) {
-    // ACP stream dotyczy TYLKO Build. Jeśli jesteśmy w Home — zaktualizuj worek Build w tle.
+    const sid =
+      (params && params.sessionId) || busySessionId || liveSessionId || null;
+
+    // Home UI — stream Build tylko do bufora / bags.grok, nie do czatu Home
     if (mode === "home") {
-      applyCodeStreamInBackground(params);
+      if (sid) applyStreamOffscreen(sid, params);
+      else applyCodeStreamInBackground(params);
       return;
     }
+
+    // Build UI, ale OGLĄDAMY INNĄ sesję niż ta ze streamu
+    if (sid && !isViewingSession(sid)) {
+      applyStreamOffscreen(sid, params);
+      return;
+    }
+
     const update = params.update || params;
     const kind = update.sessionUpdate;
     if (!kind) return;
 
     if (kind === "user_message_chunk") {
-      // ZAWSZE ignoruj echo usera z ACP podczas/po naszej wysyłce.
-      // Bańkę dodaje wyłącznie runSendTurn / kolejka.
       if (params && params._local) return;
       if (busy || streamingAssistant) return;
-      const raw = (update.content && update.content.text) || "";
-      if (isAttachmentJunkOnly(raw)) return;
-      const t = cleanUserText(raw);
-      if (!t) return;
-      if (hasUserTextAlready(t)) return;
-      // twarda bramka: w tej apce nie przyjmujemy user echa z ACP wcale
-      // (historia ładuje się z transcript, nie ze streamu live)
       return;
     }
 
     if (kind === "agent_message_chunk") {
       const chunk = (update.content && update.content.text) || "";
-      // Nie pokazuj dumpów tooli / załączników w streamie
       if (isAttachmentJunkOnly(chunk)) return;
       if (isToolEchoText(chunk)) {
-        // tool echo — tylko status, nie treść w czacie
-        setStatus("tool", "Pracuję w tle…", "grok");
-        // jeśli bańka już ma śmieci — wyczyść
+        setStatus("tool", "Pracuję w tle…", "grok", { sessionId: sid });
         if (streamingAssistant) {
           streamingAssistant.text = cleanAssistantText(streamingAssistant.text);
           patchLastAssistantBubble(streamingAssistant);
         }
+        if (sid) snapshotCurrentBuildSession();
         return;
       }
       const a = ensureStreamingAssistant();
       a.text += chunk;
       a.text = cleanAssistantText(a.text);
-      // Po czyszczeniu nic nie zostało z tego chunka = to był dump
       if (!a.text.trim()) {
-        setStatus("tool", "Pracuję w tle…", "grok");
+        setStatus("tool", "Pracuję w tle…", "grok", { sessionId: sid });
         return;
       }
-      setStatus("responding", "Piszę…", "grok");
+      setStatus("responding", "Piszę…", "grok", { sessionId: sid });
       if (!handleChatUpdate._raf) {
         handleChatUpdate._raf = requestAnimationFrame(() => {
           handleChatUpdate._raf = null;
           patchLastAssistantBubble(a);
+          if (sid) snapshotCurrentBuildSession();
         });
       }
       return;
@@ -1321,8 +1483,8 @@
     if (kind === "agent_thought_chunk") {
       const a = ensureStreamingAssistant();
       a.thinking += (update.content && update.content.text) || "";
-      setStatus("thinking", "Myślę…", "grok");
-      // NIE patchuj thinking w czacie — tylko status bar (zero skoków)
+      setStatus("thinking", "Myślę…", "grok", { sessionId: sid });
+      if (sid) snapshotCurrentBuildSession();
       return;
     }
 
@@ -1336,10 +1498,10 @@
       };
       a.tools.push(tool);
       liveTools.push({ ...tool });
-      setStatus("tool", humanizeToolTitle(rawTitle), "grok");
+      setStatus("tool", humanizeToolTitle(rawTitle), "grok", { sessionId: sid });
       renderActivity();
-      // NIE full renderMessages — tylko lekki skrót na ostatniej bańce
       patchAgentWorkPill(a);
+      if (sid) snapshotCurrentBuildSession();
       return;
     }
 
@@ -1358,10 +1520,13 @@
         if (update.title) lt.title = update.title;
       }
       if (tool && update.status !== "completed" && update.status !== "failed") {
-        setStatus("tool", humanizeToolTitle(tool.title), "grok");
+        setStatus("tool", humanizeToolTitle(tool.title), "grok", {
+          sessionId: sid,
+        });
       }
       renderActivity();
       patchAgentWorkPill(a);
+      if (sid) snapshotCurrentBuildSession();
     }
   }
 
@@ -1874,7 +2039,13 @@
     dedupeTrailingUserMessages();
     renderActivity();
     setBusy(true);
-    setStatus("thinking", mode === "home" ? "Myślę…" : "Agent startuje…");
+    if (mode === "grok" && sessionId) {
+      busySessionId = sessionId;
+      snapshotCurrentBuildSession();
+    }
+    setStatus("thinking", mode === "home" ? "Myślę…" : "Agent startuje…", mode, {
+      sessionId,
+    });
     try {
       el.input.focus({ preventScroll: true });
     } catch {
@@ -1898,6 +2069,18 @@
 
     // posprzątaj echa które weszły mimo bramek
     dedupeTrailingUserMessages();
+    if (res.ok && res.sessionId) {
+      // domknij stream tej sesji w buforze
+      const doneSid = res.sessionId;
+      if (streamBySession[doneSid] && streamingAssistant) {
+        streamingAssistant._streaming = false;
+        snapshotCurrentBuildSession();
+      }
+      // po zakończeniu zostaw snapshot do momentu przeładowania transcriptu
+    }
+    if (busySessionId === (res.sessionId || sessionId)) {
+      busySessionId = null;
+    }
     setBusy(false);
     if (!res.ok) {
       showToast(res.error || "Send failed", "error");
@@ -2408,16 +2591,32 @@
       busySessionId =
         sessionId || liveSessionId || selectedId || busySessionId || null;
       bags.grok.busy = true;
+      if (busySessionId) snapshotCurrentBuildSession();
     } else {
+      if (busySessionId) {
+        const buf = streamBySession[busySessionId];
+        if (buf && buf.streamingAssistant) buf.streamingAssistant._streaming = false;
+      }
       busySessionId = null;
       bags.grok.busy = false;
     }
-    setBusy(b, mode === "home" ? "grok" : mode);
+    // UI busy/status tylko gdy oglądamy pracującą sesję (albo Home z globalnym busy)
+    const viewingWork =
+      !b ||
+      !sessionId ||
+      isViewingSession(sessionId) ||
+      isViewingSession(busySessionId);
     if (mode === "home") {
-      // UI Home bez chipa Working z Build
+      bags.grok.busy = Boolean(b);
       el.busyChip.classList.add("hidden");
+      return;
     }
-    if (mode === "grok") renderList();
+    setBusy(b && viewingWork ? b : b, mode);
+    if (b && !viewingWork) {
+      el.busyChip.classList.add("hidden");
+      el.statusBar.classList.add("hidden");
+    }
+    renderList();
   });
   api.onChatError(({ message }) => {
     const msg = cleanUserText(message || "Error") || "Error";
@@ -2434,10 +2633,18 @@
   api.onChatModels(() => {
     if (mode === "grok") refresh();
   });
-  api.onChatStatus(({ phase, detail }) => {
-    // status z main: przypisz do trybu, z którego leci send
-    // Home send i Code send oba wołają status — trzymamy na aktywnym mode w momencie send
-    setStatus(phase, detail, mode);
+  api.onChatStatus(({ phase, detail, sessionId }) => {
+    const sid = sessionId || busySessionId;
+    // nie pokazuj „Myślę/Piszę” na innej sesji niż ta, która pracuje
+    if (sid && mode === "grok" && !isViewingSession(sid)) {
+      const buf = ensureSessionStream(sid);
+      if (buf) {
+        buf.statusPhase = phase;
+        buf.statusDetail = detail || "";
+      }
+      return;
+    }
+    setStatus(phase, detail, mode, { sessionId: sid });
   });
 
   async function boot() {
