@@ -549,33 +549,51 @@
     return "⚙";
   }
 
-  function nearBottom(threshold = 140) {
+  /** User scrolled up while agent works → nie ciągnij na dół. */
+  let stickToBottom = true;
+
+  function nearBottom(threshold = 120) {
     const box = el.chatScroll;
     if (!box) return true;
     return box.scrollHeight - box.scrollTop - box.clientHeight < threshold;
   }
 
-  /** Podczas busy / streamu zawsze trzymaj dół — zero „przelotu” od startu sesji. */
+  /**
+   * Stick tylko gdy user jest na dole (albo właśnie wysłał).
+   * NIGDY „bo busy” — to powodowało przelot przez całą sesję.
+   */
   function shouldStickBottom(force) {
     if (force) return true;
-    if (busy) return true;
-    return nearBottom(200);
+    if (!stickToBottom) return false;
+    return nearBottom(120);
   }
 
-  function scrollChatToBottom(instant) {
+  function scrollChatToBottom(_force) {
     const box = el.chatScroll;
     if (!box) return;
-    if (instant) {
-      const prev = box.style.scrollBehavior;
-      box.style.scrollBehavior = "auto";
-      box.scrollTop = box.scrollHeight;
-      box.style.scrollBehavior = prev || "";
-    } else {
-      box.scrollTop = box.scrollHeight;
-    }
+    // tylko gdy user trzyma dół (albo właśnie wysłał → stickToBottom=true)
+    if (!stickToBottom) return;
+    const prev = box.style.scrollBehavior;
+    box.style.scrollBehavior = "auto";
+    box.scrollTop = box.scrollHeight;
+    box.style.scrollBehavior = prev || "";
   }
 
-  /** Zachowaj pozycję scrolla czatu (composer autosize nie skacze). */
+  function bindChatScrollWatcher() {
+    const box = el.chatScroll;
+    if (!box || box._stickWatch) return;
+    box._stickWatch = true;
+    box.addEventListener(
+      "scroll",
+      () => {
+        // blisko dołu → znowu follow; wyżej → nie ruszaj
+        stickToBottom = nearBottom(80);
+      },
+      { passive: true }
+    );
+  }
+
+  /** Zachowaj pozycję scrolla (composer autosize). */
   function preserveChatScroll(fn) {
     const box = el.chatScroll;
     if (!box) {
@@ -583,16 +601,14 @@
       return;
     }
     const prevTop = box.scrollTop;
-    const wasBottom = shouldStickBottom(false);
+    const follow = stickToBottom && nearBottom(120);
     fn();
     const restore = () => {
       if (!el.chatScroll) return;
-      if (wasBottom || busy) scrollChatToBottom(true);
-      else {
+      if (follow) {
+        el.chatScroll.scrollTop = el.chatScroll.scrollHeight;
+      } else {
         el.chatScroll.scrollTop = prevTop;
-        if (el.chatScroll.scrollTop === 0 && prevTop > 0) {
-          el.chatScroll.scrollTop = prevTop;
-        }
       }
     };
     restore();
@@ -610,7 +626,7 @@
     let last = findLastAssistantRow();
     if (!last) {
       // NIGDY full renderMessages w trakcie tury — tylko doklej
-      appendMessageRows([m], { stick: true });
+      appendMessageRows([m], { stick: false });
       return;
     }
     let content = last.querySelector(".msg-content");
@@ -631,8 +647,10 @@
     }
     const typing = last.querySelector(".typing");
     if (typing && safe) typing.remove();
-    // tylko dociągnij dół jeśli już byliśmy na dole / busy — bez skoku „od góry”
-    if (busy || nearBottom(240)) scrollChatToBottom(true);
+    // tylko gdy user trzyma dół
+    if (stickToBottom && nearBottom(160)) {
+      scrollChatToBottom(true);
+    }
   }
 
   function patchThinking(m) {
@@ -813,15 +831,14 @@
     return row;
   }
 
-  /** Doklej bańki na koniec — BEZ wipe historii (Enter nie skacze). */
-  function appendMessageRows(msgs, { stick = true } = {}) {
+  /** Doklej bańki — scroll TYLKO gdy stickToBottom (user na dole / właśnie wysłał). */
+  function appendMessageRows(msgs, { stick = false } = {}) {
     if (!msgs || !msgs.length) return;
     el.homeHero.classList.add("hidden");
+    if (stick) stickToBottom = true;
     for (const m of msgs) {
-      // nie doklejaj drugiego usera z tym samym tekstem
       if (m.role === "user" && hasUserTextAlready(m.text) && !m._local) continue;
       if (m.role === "user" && m._local) {
-        // jeśli w DOM już jest ten tekst — nie dokładaj
         const exists = [...el.messages.querySelectorAll(".msg.user .msg-content")].some(
           (n) => normUserText(n.textContent) === normUserText(m.text)
         );
@@ -830,24 +847,20 @@
       el.messages.appendChild(buildMessageRow(m));
     }
     dedupeTrailingUserMessages();
-    if (stick || busy || shouldStickBottom(true)) {
-      scrollChatToBottom(true);
-      requestAnimationFrame(() => scrollChatToBottom(true));
-    }
+    if (stickToBottom) scrollChatToBottom();
   }
 
   function renderMessages(opts = {}) {
-    // W trakcie tury NIE przebudowuj całego czatu — to właśnie skakanie.
     if (busy && !opts.force && !opts.forceScroll) {
       if (streamingAssistant) patchLastAssistantBubble(streamingAssistant);
       return;
     }
     const forceScroll = Boolean(opts.forceScroll);
+    if (forceScroll) stickToBottom = true;
     const box = el.chatScroll;
     const prevTop = box ? box.scrollTop : 0;
-    const stickBottom = shouldStickBottom(forceScroll);
+    const stickBottom = forceScroll || stickToBottom;
 
-    // Snapshot pozycji → podmiana w ukryciu → restore (brak klatki ze scrollem=0)
     if (box) {
       box.style.visibility = "hidden";
       box.style.pointerEvents = "none";
@@ -865,7 +878,8 @@
       more.onclick = () => {
         visibleCount = Math.min(allMessages.length, visibleCount + PAGE);
         syncVisibleMessages();
-        renderMessages({ forceScroll: false, force: true });
+        stickToBottom = false;
+        renderMessages({ force: true });
       };
       frag.appendChild(more);
     }
@@ -877,14 +891,13 @@
     el.messages.replaceChildren(frag);
     if (box) {
       box.scrollTop = stickBottom ? box.scrollHeight : prevTop;
-      // force reflow before show
       void box.offsetHeight;
       box.style.visibility = "";
       box.style.pointerEvents = "";
     }
     requestAnimationFrame(() => {
       if (!el.chatScroll) return;
-      if (stickBottom || busy) scrollChatToBottom(true);
+      if (stickBottom) scrollChatToBottom();
       else el.chatScroll.scrollTop = prevTop;
     });
   }
@@ -1854,7 +1867,8 @@
     attachments = [];
     renderAttachChips();
     autosize();
-    // Enter = tylko doklej bańki, NIE przebudowuj historii
+    // Enter = doklej bańki + idź na dół TYLKO bo user właśnie wysłał
+    stickToBottom = true;
     if (toAppend.length) appendMessageRows(toAppend, { stick: true });
     else scrollChatToBottom(true);
     dedupeTrailingUserMessages();
@@ -1982,7 +1996,7 @@
       q.appendChild(inject);
       body.appendChild(q);
     }
-    if (shouldStickBottom(true)) scrollChatToBottom(true);
+    if (stickToBottom) scrollChatToBottom();
   }
 
   /** Zlej całą kolejkę w jedną wiadomość (dopowiedzenia = jedna tura, nie N). */
@@ -2646,6 +2660,8 @@
       );
     };
   }
+
+  bindChatScrollWatcher();
 
   boot().catch((err) => {
     console.error("boot failed", err);
