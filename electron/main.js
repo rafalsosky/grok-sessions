@@ -218,6 +218,8 @@ function buildListPayload() {
       pythonPath: settings.pythonPath || "",
       homeMaxTokens: settings.homeMaxTokens || 8192,
       privacyMode: Boolean(settings.privacyMode),
+      // do maskowania ścieżek w trybie prywatności (/Users/ktoś → ~)
+      homeDir: app.getPath("home"),
     },
     agentReady: Boolean(acp && acp.ready),
     promptBusy: promptBusy.grok,

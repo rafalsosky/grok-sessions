@@ -494,12 +494,23 @@
     el.input.focus();
   }
 
+  /**
+   * W trybie prywatności katalog domowy → „~”. Bez tego chip ścieżki
+   * pokazywał pełne /Users/<login> i nazwa konta lądowała na każdym
+   * zrzucie ekranu z trybu Build.
+   */
+  function maskPath(p) {
+    const s = String(p || "");
+    if (!privacyMode || !homeDirPath) return s;
+    return s.startsWith(homeDirPath) ? "~" + s.slice(homeDirPath.length) : s;
+  }
+
   function updatePathChips(cwd) {
     if (mode === "home") {
       el.cwdChip.textContent = "Home chat";
       el.wsCwd.textContent = "browser-style";
     } else {
-      el.cwdChip.textContent = cwd || defaultCwd;
+      el.cwdChip.textContent = maskPath(cwd || defaultCwd);
       el.wsCwd.textContent = basenameCwd(cwd || defaultCwd);
     }
   }
@@ -1194,6 +1205,7 @@
    */
   let privacyMode = false;
   let lastAccount = null;
+  let homeDirPath = "";
 
   function applyAccount(account) {
     if (account) lastAccount = account;
@@ -1227,6 +1239,7 @@
     privacyMode = Boolean(on);
     document.documentElement.classList.toggle("privacy", privacyMode);
     applyAccount(null);
+    updatePathChips(mode === "home" ? "" : selectedRow()?.cwd || defaultCwd);
     if (typeof refreshUsage === "function") refreshUsage();
   }
 
@@ -1259,6 +1272,7 @@
     codeRows = (payload.rows || []).filter((r) => r.kind !== "home");
     homeRows = payload.homeRows || [];
     defaultCwd = payload.settings?.defaultCwd || defaultCwd;
+    homeDirPath = payload.settings?.homeDir || homeDirPath;
     homeModelId = payload.settings?.homeModelId || homeModelId;
     codeModelId = payload.settings?.modelId || codeModelId;
     // busy tylko na jednej sesji Build
