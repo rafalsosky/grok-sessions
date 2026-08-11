@@ -30,6 +30,8 @@ const DEFAULTS = {
   pythonPath: "",
   /** Limit odpowiedzi w trybie Home */
   homeMaxTokens: 8192,
+  /** Ukryj imię i e-mail w interfejsie (zrzuty ekranu, nagrania) */
+  privacyMode: false,
 };
 
 const PERMISSION_MODES = ["auto", "ask"];
@@ -75,6 +77,7 @@ function loadSettings(userDataDir) {
     merged.permissionMode = "auto";
   }
   merged.readBrowserCookies = Boolean(merged.readBrowserCookies);
+  merged.privacyMode = Boolean(merged.privacyMode);
   merged.pythonPath = merged.pythonPath ? expandHome(merged.pythonPath) : "";
   merged.homeMaxTokens = clampTokens(merged.homeMaxTokens);
   merged.grokHome = grokHome;
@@ -111,6 +114,7 @@ function saveSettings(userDataDir, partial) {
     readBrowserCookies: Boolean(next.readBrowserCookies),
     pythonPath: next.pythonPath || "",
     homeMaxTokens: clampTokens(next.homeMaxTokens),
+    privacyMode: Boolean(next.privacyMode),
   };
   fs.mkdirSync(userDataDir, { recursive: true });
   fs.writeFileSync(

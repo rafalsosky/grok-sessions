@@ -217,6 +217,7 @@ function buildListPayload() {
       readBrowserCookies: Boolean(settings.readBrowserCookies),
       pythonPath: settings.pythonPath || "",
       homeMaxTokens: settings.homeMaxTokens || 8192,
+      privacyMode: Boolean(settings.privacyMode),
     },
     agentReady: Boolean(acp && acp.ready),
     promptBusy: promptBusy.grok,

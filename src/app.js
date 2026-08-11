@@ -1187,23 +1187,47 @@
     });
   }
 
+  /**
+   * Tryb prywatności: chowa imię i adres e-mail wszędzie, gdzie są widoczne.
+   * Do zrzutów ekranu, nagrań i pokazywania aplikacji na żywo — żeby nie
+   * trzeba było potem zamazywać stopki na obrazku.
+   */
+  let privacyMode = false;
+  let lastAccount = null;
+
   function applyAccount(account) {
-    if (!account) return;
-    el.accountName.textContent = account.name || account.label || "—";
-    el.accountSub.textContent = account.loggedIn
-      ? account.email || "signed in"
-      : "Not signed in";
-    el.accountAvatar.textContent = (
-      account.name ||
-      account.email ||
-      "?"
-    )
+    if (account) lastAccount = account;
+    const acc = lastAccount;
+    if (!acc) return;
+
+    if (privacyMode) {
+      el.accountName.textContent = acc.loggedIn ? "Zalogowano" : "Nie zalogowano";
+      el.accountSub.textContent = acc.loggedIn ? "konto ukryte" : "—";
+      el.accountAvatar.textContent = "•";
+      el.accountDetail.textContent = acc.loggedIn
+        ? "Dane konta ukryte (tryb prywatności)"
+        : "Nie zalogowano. Użyj „Zaloguj”.";
+      return;
+    }
+
+    el.accountName.textContent = acc.name || acc.label || "—";
+    el.accountSub.textContent = acc.loggedIn
+      ? acc.email || "zalogowano"
+      : "Nie zalogowano";
+    el.accountAvatar.textContent = (acc.name || acc.email || "?")
       .trim()
       .charAt(0)
       .toUpperCase();
-    el.accountDetail.textContent = account.loggedIn
-      ? `${account.name || ""}\n${account.email || ""}\nSuperGrok / xAI session`
-      : "Nie zalogowano. Użyj Log in.";
+    el.accountDetail.textContent = acc.loggedIn
+      ? `${acc.name || ""}\n${acc.email || ""}\nSesja SuperGrok / xAI`
+      : "Nie zalogowano. Użyj „Zaloguj”.";
+  }
+
+  function setPrivacyMode(on) {
+    privacyMode = Boolean(on);
+    document.documentElement.classList.toggle("privacy", privacyMode);
+    applyAccount(null);
+    if (typeof refreshUsage === "function") refreshUsage();
   }
 
   function applyModelsForMode() {
@@ -2973,6 +2997,7 @@
     document.getElementById("set-max-tokens").value = s.homeMaxTokens || 8192;
     document.getElementById("set-cookies").checked = Boolean(s.readBrowserCookies);
     document.getElementById("set-python").value = s.pythonPath || "";
+    document.getElementById("set-privacy").checked = Boolean(s.privacyMode);
     el.settingsModal.classList.remove("hidden");
   };
   document.getElementById("set-cancel").onclick = () =>
@@ -3007,7 +3032,9 @@
   document.getElementById("set-save").onclick = async () => {
     const theme = document.getElementById("set-theme").value;
     const permissionMode = document.getElementById("set-permission").value;
+    const wantPrivacy = document.getElementById("set-privacy").checked;
     await api.setSettings({
+      privacyMode: wantPrivacy,
       grokPath: document.getElementById("set-grok-path").value.trim(),
       defaultCwd: document.getElementById("set-cwd").value.trim(),
       showSubagents: document.getElementById("set-subagents").checked,
@@ -3020,6 +3047,7 @@
     document.documentElement.setAttribute("data-theme", theme);
     permMode = permissionMode;
     paintPermChip();
+    setPrivacyMode(wantPrivacy);
     el.settingsModal.classList.add("hidden");
     showToast("Zapisane", "ok");
     await refresh();
@@ -3039,9 +3067,21 @@
   };
 
   window.addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n") {
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "n" && !e.shiftKey) {
       e.preventDefault();
       newChat();
+    }
+    // ⌘⇧P — tryb prywatności przed zrzutem ekranu
+    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "p") {
+      e.preventDefault();
+      setPrivacyMode(!privacyMode);
+      api.setSettings({ privacyMode }).catch(() => {});
+      showToast(
+        privacyMode
+          ? "Tryb prywatności włączony — dane konta ukryte"
+          : "Tryb prywatności wyłączony",
+        "ok"
+      );
     }
   });
 
@@ -3158,6 +3198,7 @@
     }
     permMode = data.settings?.permissionMode || "auto";
     paintPermChip();
+    if (data.settings?.privacyMode) setPrivacyMode(true);
     if (typeof api.getSessionFlags === "function") {
       try {
         const fr = await api.getSessionFlags();
@@ -3309,9 +3350,11 @@
       }
       const planBit = plan?.tierLabel ? ` · ${plan.tierLabel}` : "";
       if (usageEls.account) {
-        usageEls.account.textContent = u.account?.email
-          ? `${u.account.name || ""} · ${u.account.email}${planBit}`.trim()
-          : `konto: —${planBit}`;
+        usageEls.account.textContent = privacyMode
+          ? `konto ukryte${planBit}`.trim()
+          : u.account?.email
+            ? `${u.account.name || ""} · ${u.account.email}${planBit}`.trim()
+            : `konto: —${planBit}`;
       }
     } catch (err) {
       usageEls.pct.textContent = "!";

@@ -185,6 +185,15 @@ group("settings: walidacja i wartości domyślne");
     );
   });
 
+  // Tryb prywatności musi przetrwać restart, bo służy do nagrywania
+  // i pokazywania aplikacji na żywo.
+  test("tryb prywatności: domyślnie wyłączony, zapisuje się", () => {
+    assert.strictEqual(loadSettings(dir).privacyMode, false);
+    assert.strictEqual(saveSettings(dir, { privacyMode: true }).privacyMode, true);
+    assert.strictEqual(loadSettings(dir).privacyMode, true);
+    saveSettings(dir, { privacyMode: false });
+  });
+
   test("motyw spoza listy wraca do dark", () => {
     assert.strictEqual(saveSettings(dir, { theme: "neon" }).theme, "dark");
     assert.strictEqual(saveSettings(dir, { theme: "light" }).theme, "light");
