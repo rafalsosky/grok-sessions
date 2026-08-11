@@ -23,12 +23,24 @@ i lokalne pliki sesji.
 
 ## Wymagania
 
-| Co | Po co |
-|---|---|
-| macOS 11+ | uruchomienie Electrona (Windows i Linux nietestowane) |
-| Node.js 18+ | `npm install`, `npm start` |
-| Grok CLI (`grok`) | agent i sesje |
-| Konto z dostępem do Groka | logowanie przez `grok login` |
+| Co | Po co | Jak sprawdzić |
+|---|---|---|
+| macOS 11+ | patrz „Platformy” niżej | — |
+| Node.js 18+ | `npm install`, `npm start` | `node -v` |
+| Grok CLI (`grok`) | agent, sesje, logowanie | `grok --version` |
+| Konto z dostępem do Groka | bez tego agent nie ruszy | `grok login` |
+
+Nie masz jeszcze CLI? Instrukcja instalacji jest w dokumentacji xAI:
+[docs.x.ai](https://docs.x.ai). Aplikacja szuka binarki w `~/.grok/bin/grok`;
+jeśli masz ją gdzie indziej, wskaż ścieżkę w Ustawieniach albo przez
+„Browse…”. Sprawdź, czy CLI działa samo, zanim uruchomisz aplikację:
+
+```bash
+grok --version && grok sessions list -n 3
+```
+
+Jeśli ta komenda działa, aplikacja też zadziała. Jeśli nie — problem jest
+po stronie CLI, nie tej nakładki.
 
 ## Instalacja
 
@@ -164,10 +176,49 @@ grok-sessions/
   Token Build tego nie widzi.
 - **Wideo** w Home zależy od dostępności API na koncie; gdy go nie ma,
   aplikacja generuje klatkę storyboard zamiast filmu.
-- **Windows i Linux** nie są testowane.
+- **Windows i Linux**: patrz „Platformy” niżej.
 - Aplikacja nie jest podpisana certyfikatem Apple.
 - Usunięcie wiadomości z widoku Build **nie kasuje jej z pamięci agenta** —
   sesja `grok` żyje po stronie CLI. Aplikacja mówi o tym wprost przy usuwaniu.
+
+---
+
+## Platformy
+
+Zbudowane i używane na macOS. Reszta kodu jest przenośna (Electron, `path.join`,
+`os.homedir()`), ale **cztery rzeczy są zrobione pod macOS** i na Windows albo
+Linuksie wymagają pracy:
+
+| Element | Stan poza macOS | Ile roboty |
+|---|---|---|
+| Przycisk „Log in” (otwiera terminal z `grok login`) | nie działa, aplikacja mówi wprost, żeby wpisać komendę ręcznie | mała: `cmd /c start` albo `x-terminal-emulator` |
+| Wygląd paska tytułu (`hiddenInset`, pozycja przycisków) | ignorowane, okno może wyglądać inaczej | mała |
+| Ikona aplikacji (`.icns`) | Windows chce `.ico` | mała |
+| `scripts/make-app.sh` (buduje `.app`) | tylko macOS | trzeba osobnego pakowania, np. electron-builder |
+
+Sam rdzeń — lista sesji, agent po ACP, czat, załączniki, ustawienia — nie ma
+w sobie nic macOS-owego. Katalog danych i nazwa binarki (`grok.exe`) są już
+obsłużone per system.
+
+**Nie deklaruję wsparcia dla Windows, bo tego nie przetestowałem.** Jeśli
+odpalisz to u siebie i zadziała, daj znać w Issues — chętnie dopiszę do
+README, a poprawki do tych czterech punktów przyjmę jako PR.
+
+---
+
+## Coś nie działa
+
+| Objaw | Przyczyna |
+|---|---|
+| „grok binary not found” | Ustawienia → wskaż ścieżkę przez „Browse…” |
+| Lista sesji pusta | `grok sessions list` też jest puste? Wtedy to CLI, nie aplikacja |
+| „Not signed in” mimo logowania | sprawdź `~/.grok/auth.json`; jeśli go nie ma, `grok login` się nie dokończyło |
+| Aplikacja nie startuje po `npm start` | `node -v` musi być 18+; usuń `node_modules` i `npm install` od nowa |
+| macOS blokuje `.app` | prawy przycisk → Otwórz (aplikacja nie jest podpisana) |
+| Tygodniowy % pusty | tak ma być, dopóki nie włączysz czytania ciasteczek (patrz „Bezpieczeństwo”) |
+
+Logi aplikacji: `$TMPDIR/supergrok-desktop.log` przy starcie z `.app`,
+a przy `npm start` lecą na konsolę. Devtools: `GROK_SESSIONS_DEBUG=1 npm start`.
 
 ## Licencja
 

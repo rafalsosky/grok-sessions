@@ -1079,12 +1079,20 @@ try {
   /* ignore */
 }
 
-// Stały katalog danych — nie rozjeżdżaj się między "Electron" a nazwą produktu
+// Stały katalog danych — nie rozjeżdżaj się między "Electron" a nazwą produktu.
+// Ścieżka „Library/Application Support” istnieje tylko na macOS; poza nim
+// zostawiamy domyślną lokalizację Electrona (AppData na Windows, ~/.config
+// na Linuksie), inaczej powstawał katalog o nazwie ze ścieżki macOS.
 try {
-  app.setPath(
-    "userData",
-    path.join(app.getPath("home"), "Library/Application Support/SuperGrok Desktop SoskyApp")
-  );
+  if (process.platform === "darwin") {
+    app.setPath(
+      "userData",
+      path.join(
+        app.getPath("home"),
+        "Library/Application Support/SuperGrok Desktop SoskyApp"
+      )
+    );
+  }
 } catch (_) {
   /* ignore */
 }

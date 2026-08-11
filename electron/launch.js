@@ -66,6 +66,19 @@ exec zsh
  */
 async function launchInTerminal(opts) {
   const command = buildGrokCommand(opts);
+
+  // Otwieranie terminala jest zrobione pod macOS (AppleScript / .command).
+  // Zamiast udawać, że zadziałało, na innych systemach mówimy wprost, co
+  // wpisać ręcznie — to jedna komenda.
+  if (process.platform !== "darwin") {
+    return {
+      ok: false,
+      method: null,
+      command,
+      error: `Automatic terminal launch is macOS-only. Run this yourself: ${command}`,
+    };
+  }
+
   try {
     await launchViaAppleScript(command);
     return { ok: true, method: "applescript", command };

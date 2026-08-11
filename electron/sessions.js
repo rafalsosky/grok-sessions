@@ -21,7 +21,8 @@ function resolveGrokHome(override) {
 }
 
 function defaultGrokPath(grokHome) {
-  return path.join(grokHome, "bin", "grok");
+  const bin = process.platform === "win32" ? "grok.exe" : "grok";
+  return path.join(grokHome, "bin", bin);
 }
 
 function pidAlive(pid) {
