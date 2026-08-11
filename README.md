@@ -9,13 +9,14 @@ lista sesji z boku, czat w oknie zamiast w terminalu, tryb rozmowy i tryb agenta
 **To nie jest oficjalny produkt xAI.** To otwartoźródłowa nakładka na CLI `grok`
 i lokalne pliki sesji.
 
-<!-- Zrzuty ekranu: zrób je przy uruchomionej aplikacji i wrzuć do assets/,
-     potem odkomentuj poniższe linie.
-     macOS: ⇧⌘4 potem spacja i klik w okno, albo:
-       screencapture -w -o assets/screenshot-build.png
-![Tryb Build](assets/screenshot-build.png)
-![Tryb Home](assets/screenshot-home.png)
--->
+![Tryb Build, motyw ciemny](assets/screenshot-dark.png)
+
+<details>
+<summary>Motyw jasny</summary>
+
+![Tryb Build, motyw jasny](assets/screenshot-light.png)
+
+</details>
 
 
 ---
