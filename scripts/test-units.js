@@ -198,7 +198,13 @@ group("repo: bez zaszytych ścieżek i danych osobowych");
   const files = [];
   const walk = (dir) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (["node_modules", ".git", "assets", "dist"].includes(e.name)) continue;
+      if (
+        ["node_modules", ".git", "assets", "dist", "tmp", "out", "coverage"].includes(
+          e.name
+        )
+      ) {
+        continue;
+      }
       const full = path.join(dir, e.name);
       if (e.isDirectory()) walk(full);
       else if (/\.(js|css|html|json|md)$/.test(e.name) && e.name !== "package-lock.json") {
@@ -268,7 +274,59 @@ group("electron: twarde zabezpieczenia w main.js");
     assert.ok(!mk.includes("--no-sandbox")));
 }
 
-console.log(
-  `\n${passed} testów przeszło` +
-    (process.exitCode ? ", są błędy (patrz wyżej)" : ", zero błędów")
-);
+/* ── 8. Pobieranie wygenerowanych plików ──────────────────────────────
+   Obrazy i wideo z imgen/vidgen.x.ai potrafią urwać się w połowie
+   transferu. Krótki plik udający wynik jest gorszy niż błąd, bo pieniądze
+   za generowanie i tak poszły. */
+(async () => {
+  group("xai-api: pobieranie wygenerowanych plików");
+  const http = require("http");
+  const xai = require(path.join(ROOT, "electron", "xai-api"));
+
+  const full = Buffer.alloc(64 * 1024, 7);
+  let seenUA = "";
+  const srv = http.createServer((req, res) => {
+    seenUA = req.headers["user-agent"] || "";
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", String(full.length));
+    if (req.url === "/truncated") {
+      res.end(full.subarray(0, 1000)); // Content-Length kłamie — jak Cloudflare
+      return;
+    }
+    res.end(full);
+  });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+
+  const asyncTest = async (name, fn) => {
+    try {
+      await fn();
+      passed++;
+      console.log("  ok  " + name);
+    } catch (err) {
+      console.error("  FAIL " + name);
+      console.error("       " + err.message);
+      process.exitCode = 1;
+    }
+  };
+
+  await asyncTest("pełny plik przechodzi i ma poprawny rozmiar", async () => {
+    const dl = await xai.downloadBuffer(`${base}/ok`);
+    assert.strictEqual(dl.buf.length, full.length);
+    assert.ok(dl.mimeType.includes("video/mp4"));
+  });
+  await asyncTest("User-Agent jest przeglądarkowy (Cloudflare 403)", () =>
+    assert.ok(/Mozilla\/5\.0/.test(seenUA), `UA = ${seenUA}`));
+  await asyncTest("urwane pobieranie rzuca błąd, nie oddaje kikuta", async () => {
+    await assert.rejects(
+      () => xai.downloadBuffer(`${base}/truncated`, { tries: 1 }),
+      /Nie udało się pobrać/
+    );
+  });
+  srv.close();
+
+  console.log(
+    `\n${passed} testów przeszło` +
+      (process.exitCode ? ", są błędy (patrz wyżej)" : ", zero błędów")
+  );
+})();
