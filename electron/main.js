@@ -23,6 +23,7 @@ const {
   saveBase64,
   importPath,
   formatAttachmentsForPrompt,
+  extFromMime,
 } = require("./attachments");
 const { getUsage } = require("./usage");
 const sessionFlags = require("./session-flags");
@@ -399,7 +400,7 @@ async function sendHomeChat({
     /wygeneruj wideo|generate video|zrób film/i.test(String(text || ""));
 
   if (wantVideo) {
-    status("generating_image", "Generuję wideo / klatkę…");
+    status("generating_image", "Generuję wideo…");
     const prompt = String(text || "")
       .replace(/^\/video\s+/i, "")
       .trim();
@@ -407,34 +408,26 @@ async function sendHomeChat({
       prompt,
       aspect_ratio: aspectRatio || "16:9",
       signal,
+      onProgress: (p) =>
+        status("generating_image", `Generuję wideo… ${p}%`),
     });
-    let assistantMsg;
-    if (vid.kind === "storyboard" || vid.b64) {
-      const saved = saveBase64(userDataDir(), {
-        name: "video-frame.png",
-        mimeType: vid.mimeType || "image/png",
-        base64: vid.b64,
-        kind: "image",
-      });
-      assistantMsg = {
-        id: `a-${Date.now()}`,
-        role: "assistant",
-        content: vid.note || "Klatka wideo / storyboard.",
-        images: [
-          { path: saved.path, mimeType: saved.mimeType, b64: vid.b64 },
-        ],
-        createdAt: new Date().toISOString(),
-      };
-    } else {
-      assistantMsg = {
-        id: `a-${Date.now()}`,
-        role: "assistant",
-        content: vid.url
-          ? `Wideo: ${vid.url}`
-          : "Wideo wygenerowane (brak podglądu w UI).",
-        createdAt: new Date().toISOString(),
-      };
-    }
+    // b64 NIE ląduje w wiadomości: plik ma kilka MB, a historia czatu
+    // trzymana jest w JSON-ie. W UI odtwarzamy ze ścieżki.
+    const saved = saveBase64(userDataDir(), {
+      name: "video.mp4",
+      mimeType: vid.mimeType,
+      base64: vid.b64,
+      kind: "video",
+    });
+    const assistantMsg = {
+      id: `a-${Date.now()}`,
+      role: "assistant",
+      content: `Wygenerowano wideo (${aspectRatio || "16:9"}${
+        vid.duration ? `, ${vid.duration} s` : ""
+      }) dla: „${prompt.slice(0, 120)}"`,
+      videos: [{ path: saved.path, mimeType: saved.mimeType }],
+      createdAt: new Date().toISOString(),
+    };
     chat = homeChats.appendHomeMessage(userDataDir(), chat.id, assistantMsg);
     return {
       ok: true,
@@ -455,7 +448,9 @@ async function sendHomeChat({
       signal,
     });
     const saved = saveBase64(userDataDir(), {
-      name: "generated.png",
+      // API oddaje JPEG, nie PNG — rozszerzenie z mime, bo readPreview
+      // wnioskuje typ z nazwy pliku przy odtwarzaniu historii.
+      name: `generated${extFromMime(img.mimeType)}`,
       mimeType: img.mimeType,
       base64: img.b64,
       kind: "image",
@@ -702,6 +697,7 @@ function registerIpc() {
         tools: [],
         thinking: "",
         images: m.images || [],
+        videos: m.videos || [],
         attachments: m.attachments || [],
       }));
       return { messages, error: null, kind: "home", title: chat.title };
@@ -1042,7 +1038,7 @@ function registerIpc() {
         return { ok: false, error: "missing" };
       }
       const ext = path.extname(filePath).toLowerCase();
-      if (![".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(ext)) {
+      if (![".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"].includes(ext)) {
         return { ok: false, error: "not image" };
       }
       const buf = fs.readFileSync(filePath);
@@ -1053,7 +1049,9 @@ function registerIpc() {
             ? "image/webp"
             : ext === ".gif"
               ? "image/gif"
-              : "image/jpeg";
+              : ext === ".mp4"
+                ? "video/mp4"
+                : "image/jpeg";
       return {
         ok: true,
         dataUrl: `data:${mime};base64,${buf.toString("base64")}`,

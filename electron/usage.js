@@ -150,33 +150,45 @@ let cookieCache = { at: 0, header: null, error: null };
  * konkretne konto — patrz README, sekcja „Tygodniowy %".
  */
 function findRookiePython(explicitPath) {
-  const candidates = [];
-  if (explicitPath) candidates.push(expandUser(explicitPath));
-  if (process.env.GROK_SESSIONS_PYTHON) {
-    candidates.push(expandUser(process.env.GROK_SESSIONS_PYTHON));
-  }
-  const home = process.env.HOME || "";
-  const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
-  for (const d of dirs) {
-    candidates.push(path.join(d, "python3"), path.join(d, "python"));
-  }
-  candidates.push(
-    path.join(home, ".local/bin/python3"),
-    "/opt/homebrew/bin/python3",
-    "/usr/local/bin/python3",
-    "/usr/bin/python3"
-  );
-  for (const p of candidates) {
+  const out = [];
+  const add = (p) => {
+    if (!p) return;
+    const full = expandUser(p);
+    if (out.includes(full)) return;
     try {
-      if (p && fs.existsSync(p)) {
-        fs.accessSync(p, fs.constants.X_OK);
-        return p;
-      }
+      fs.accessSync(full, fs.constants.X_OK);
+      out.push(full);
     } catch {
-      /* next */
+      /* nie ma albo nie wykonywalny */
     }
+  };
+
+  add(explicitPath);
+  add(process.env.GROK_SESSIONS_PYTHON);
+
+  const home = process.env.HOME || "";
+  // Narzędzia uv trzymają własne wirtualne środowiska; rookiepy bywa tylko
+  // w jednym z nich. Przeglądamy katalog, nie zgadujemy nazwy narzędzia.
+  const uvTools = path.join(home, ".local/share/uv/tools");
+  try {
+    for (const name of fs.readdirSync(uvTools)) {
+      add(path.join(uvTools, name, "bin", "python"));
+      add(path.join(uvTools, name, "bin", "python3"));
+    }
+  } catch {
+    /* brak uv */
   }
-  return null;
+
+  for (const d of (process.env.PATH || "").split(path.delimiter).filter(Boolean)) {
+    add(path.join(d, "python3"));
+    add(path.join(d, "python"));
+  }
+  add(path.join(home, ".local/bin/python3"));
+  add("/opt/homebrew/bin/python3");
+  add("/usr/local/bin/python3");
+  add("/usr/bin/python3");
+
+  return out;
 }
 
 function expandUser(p) {
@@ -200,12 +212,12 @@ function loadBrowserCookieHeader(pythonPath) {
     // nie próbuj co odświeżenie, gdy i tak nie ma czego czytać
     return Promise.resolve(null);
   }
-  const py = findRookiePython(pythonPath);
-  if (!py) {
+  const pythons = findRookiePython(pythonPath);
+  if (!pythons.length) {
     cookieCache = {
       at: now,
       header: null,
-      error: "Brak Pythona z modułem rookiepy (patrz README)",
+      error: "Nie znaleziono Pythona (patrz README)",
     };
     return Promise.resolve(null);
   }
@@ -239,37 +251,50 @@ if not picked:
 header = "; ".join(f"{c['name']}={c['value']}" for c in picked)
 print(json.dumps({"ok": True, "header": header, "count": len(picked)}))
 `;
-  return new Promise((resolve) => {
-    execFile(
-      py,
-      ["-c", script],
-      { encoding: "utf8", timeout: 15000, env: process.env },
-      (err, stdout, stderr) => {
-        const at = Date.now();
-        const line = (stdout || "").trim().split("\n").pop() || "";
-        let data = null;
-        try {
-          data = JSON.parse(line);
-        } catch {
-          cookieCache = {
-            at,
-            header: null,
-            error: ((err && err.message) || stderr || "cookie script fail").slice(
-              0,
-              160
-            ),
-          };
-          return resolve(null);
+  // Nie każdy Python ma rookiepy — bierzemy pierwszy, który naprawdę zadziała,
+  // zamiast pierwszego z PATH.
+  const runOne = (py) =>
+    new Promise((resolve) => {
+      execFile(
+        py,
+        ["-c", script],
+        { encoding: "utf8", timeout: 15000, env: process.env },
+        (err, stdout, stderr) => {
+          const line = (stdout || "").trim().split("\n").pop() || "";
+          try {
+            const data = JSON.parse(line);
+            resolve(data && data.ok && data.header ? data : { ok: false, error: data.error });
+          } catch {
+            resolve({
+              ok: false,
+              error: ((err && err.message) || stderr || "cookie script fail").slice(0, 160),
+            });
+          }
         }
-        if (!data.ok || !data.header) {
-          cookieCache = { at, header: null, error: data.error || "Brak ciasteczek" };
-          return resolve(null);
-        }
-        cookieCache = { at, header: data.header, error: null };
-        resolve(data.header);
+      );
+    });
+
+  return (async () => {
+    let lastError = "Brak ciasteczek";
+    for (const py of pythons) {
+      const res = await runOne(py);
+      if (res.ok) {
+        cookieCache = { at: Date.now(), header: res.header, error: null };
+        return res.header;
       }
-    );
-  });
+      if (res.error) lastError = res.error;
+      // brak modułu = próbuj kolejnego interpretera; inny błąd = to nie python
+      if (!/rookiepy|No module named/i.test(String(res.error || ""))) break;
+    }
+    cookieCache = {
+      at: Date.now(),
+      header: null,
+      error: /rookiepy|No module named/i.test(lastError)
+        ? "Żaden Python nie ma modułu rookiepy — zainstaluj: pip3 install rookiepy"
+        : lastError,
+    };
+    return null;
+  })();
 }
 
 /* ─── Protobuf (minimal) for GetGrokCreditsConfig ─── */
@@ -607,7 +632,7 @@ async function fetchPlanUsage(token, opts = {}) {
       weeklyError =
         /oauth2/i.test(rlRes.json.message) ||
         /WKE=unauthorized/i.test(rlRes.json.message)
-          ? "Zaloguj się w Arc/Chrome na grok.com — stamtąd bierzemy % tygodniowy (token Build tego nie widzi)"
+          ? "xAI blokuje ten limit dla tokenów OAuth (oauth2-auth-forbidden). Jedyna droga to sesja przeglądarki: Ustawienia → „Czytaj ciasteczka grok.com”."
           : String(rlRes.json.message).slice(0, 160);
     } else if (!opts.readBrowserCookies) {
       weeklyError =

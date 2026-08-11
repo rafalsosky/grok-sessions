@@ -766,15 +766,14 @@
    * Obrazy dochodzą asynchronicznie (IPC + base64) i rosną PO ustawieniu
    * scrollTop. Bez tego widok zostawał nad ostatnią wiadomością.
    */
-  function stickAfterImage(img) {
-    img.addEventListener(
-      "load",
-      () => {
-        layoutChatBottom();
-        if (stickToBottom) scrollChatToBottom(false);
-      },
-      { once: true }
-    );
+  function stickAfterImage(el) {
+    const onReady = () => {
+      layoutChatBottom();
+      if (stickToBottom) scrollChatToBottom(false);
+    };
+    el.addEventListener("load", onReady, { once: true });
+    // <video> nie emituje "load" — dopiero metadane znają wysokość
+    el.addEventListener("loadedmetadata", onReady, { once: true });
   }
 
   /** Zachowaj pozycję scrolla (composer autosize). */
@@ -915,6 +914,24 @@
           });
         }
         gal.appendChild(im);
+      }
+      body.appendChild(gal);
+    }
+
+    if (m.videos && m.videos.length) {
+      const gal = document.createElement("div");
+      gal.className = "msg-images";
+      for (const v of m.videos) {
+        const vid = document.createElement("video");
+        vid.className = "msg-video";
+        vid.controls = true;
+        vid.preload = "metadata";
+        // Plik prosto z dysku (file://), NIE przez readPreview: kilkumegabajtowe
+        // wideo szłoby przez IPC jako base64 (+33% i cały plik w pamięci),
+        // a przeglądarka i tak nie może przewijać data: URL-a.
+        if (v.path) vid.src = "file://" + encodeURI(v.path).replace(/#/g, "%23");
+        stickAfterImage(vid);
+        gal.appendChild(vid);
       }
       body.appendChild(gal);
     }
@@ -2500,6 +2517,7 @@
       if (streamingAssistant) {
         streamingAssistant.text = res.assistant.content || "";
         streamingAssistant.images = res.assistant.images || [];
+        streamingAssistant.videos = res.assistant.videos || [];
         streamingAssistant._streaming = false;
         // podmień ostatnią bańkę asystenta bez wipe
         const lastRow = el.messages.lastElementChild;
@@ -2515,6 +2533,7 @@
           role: "assistant",
           text: res.assistant.content || "",
           images: res.assistant.images || [],
+          videos: res.assistant.videos || [],
           tools: [],
         };
         pushAll(msg);
@@ -2813,7 +2832,7 @@
     if (homeKind === "image") {
       el.input.placeholder = "Opisz grafikę… (proporcje po prawej)";
     } else if (homeKind === "video") {
-      el.input.placeholder = "Opisz wideo… (jeśli API niedostępne → storyboard)";
+      el.input.placeholder = "Opisz wideo… (8 s, generuje się ok. minuty)";
     } else {
       el.input.placeholder =
         "Message Grok… (Enter = send, ⌘V = wklej screenshot)";
@@ -3255,7 +3274,8 @@
         if (usageEls.weeklyDetail) {
           usageEls.weeklyDetail.textContent =
             plan?.weeklyError ||
-            "Zaloguj się w Arc/Chrome na grok.com — stamtąd bierzemy % tygodniowy";
+            "Tygodniowy % : Ustawienia → „Czytaj ciasteczka grok.com”. " +
+            "xAI nie udostępnia tego limitu tokenowi z grok login.";
         }
       }
 

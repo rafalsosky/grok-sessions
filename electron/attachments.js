@@ -17,6 +17,7 @@ function extFromMime(mime) {
   if (m.includes("jpeg") || m.includes("jpg")) return ".jpg";
   if (m.includes("webp")) return ".webp";
   if (m.includes("gif")) return ".gif";
+  if (m.includes("mp4")) return ".mp4";
   if (m.includes("pdf")) return ".pdf";
   if (m.includes("svg")) return ".svg";
   return ".bin";

@@ -1943,3 +1943,13 @@ html[data-theme="light"] .usage-bar-track {
   opacity: 0.45;
   pointer-events: none;
 }
+
+/* Wideo w czacie: te same proporcje co obrazy, ale z kontrolkami */
+.msg-video {
+  max-width: min(520px, 100%);
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-300);
+  display: block;
+}

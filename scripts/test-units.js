@@ -121,6 +121,37 @@ group("markdown: bloki kodu i bezpieczeństwo");
   });
 }
 
+/* ── 2b. Wideo i media w UI ───────────────────────────────────────────
+   Wideo generuje się asynchronicznie i wraca jako plik na dysku. Trzy
+   rzeczy potrafiły je „zgubić": CSP bez media-src (element <video> nie
+   miał prawa wczytać pliku), brak przenoszenia pola `videos` przy
+   odtwarzaniu historii czatu, i renderowanie przez data: URL. */
+group("wideo: CSP, historia, źródło pliku");
+{
+  const html = fs.readFileSync(path.join(ROOT, "src", "index.html"), "utf8");
+  const main = fs.readFileSync(path.join(ROOT, "electron", "main.js"), "utf8");
+  const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+
+  test("CSP pozwala <video> wczytać plik (media-src)", () => {
+    const csp = (html.match(/Content-Security-Policy"[\s\S]*?content="([^"]+)"/) ||
+      [])[1];
+    assert.ok(csp, "brak meta CSP");
+    assert.ok(/media-src[^;]*file:/.test(csp), "media-src bez file: — wideo się nie odtworzy");
+  });
+
+  test("historia czatu zachowuje wideo", () =>
+    assert.ok(/videos:\s*m\.videos/.test(main), "transcript gubi pole videos"));
+
+  test("wideo leci z dysku, nie przez base64 w IPC", () => {
+    assert.ok(/vid\.src = "file:\/\/"/.test(app), "wideo nadal przez data: URL");
+  });
+
+  test("extFromMime rozpoznaje mp4", () => {
+    const { extFromMime } = require("../electron/attachments");
+    assert.strictEqual(extFromMime("video/mp4"), ".mp4");
+  });
+}
+
 /* ── 3. Ustawienia ────────────────────────────────────────────────────
    Nowe pola: tryb uprawnień, opt-in na ciasteczka, limit tokenów. */
 group("settings: walidacja i wartości domyślne");

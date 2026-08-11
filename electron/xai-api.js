@@ -210,9 +210,67 @@ async function chatCompletions(
   );
 }
 
+// imgen.x.ai / vidgen.x.ai stoją za Cloudflare i mają dwie pułapki:
+// 1) skryptowy User-Agent dostaje 403 — musi być przeglądarkowy,
+// 2) transfer potrafi urwać się w połowie, a krótki plik udaje wynik,
+//    więc porównujemy rozmiar z Content-Length i ponawiamy.
+const BROWSER_UA =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/131.0 Safari/537.36";
+
+function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(new Error("Przerwano"));
+      return;
+    }
+    const t = setTimeout(resolve, ms);
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(t);
+          reject(new Error("Przerwano"));
+        },
+        { once: true }
+      );
+    }
+  });
+}
+
+async function downloadBuffer(url, { signal = null, tries = 3 } = {}) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: { "User-Agent": BROWSER_UA, Accept: "*/*" },
+        signal,
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      const expected = Number(res.headers.get("content-length") || 0);
+      if (!buf.length || (expected && buf.length !== expected)) {
+        throw new Error(`urwane pobieranie (${buf.length}/${expected} B)`);
+      }
+      return { buf, mimeType: res.headers.get("content-type") || "" };
+    } catch (err) {
+      if (signal && signal.aborted) throw new Error("Przerwano");
+      lastErr = err;
+      await sleep(1000 * (attempt + 1), signal);
+    }
+  }
+  throw new Error(
+    `Nie udało się pobrać pliku (${lastErr ? lastErr.message : "brak szczegółów"}): ${url}`
+  );
+}
+
 /**
  * Image generation via grok-imagine-image*
  * returns { b64, mimeType, model }
+ *
+ * response_format=url, nie b64_json: przy 250-350 KB odpowiedź base64
+ * regularnie urywała się w połowie i generowanie padało mimo pobrania opłaty.
+ * URL to kilkaset bajtów JSON-a, plik dociągamy osobno.
  */
 async function generateImage(
   token,
@@ -222,7 +280,7 @@ async function generateImage(
     model,
     prompt,
     n: 1,
-    response_format: "b64_json",
+    response_format: "url",
   };
   if (aspect_ratio) body.aspect_ratio = aspect_ratio;
   const res = await apiRequest(token, "/v1/images/generations", body, {
@@ -230,80 +288,91 @@ async function generateImage(
     signal,
   });
   const item = res && res.data && res.data[0];
-  if (!item || !item.b64_json) {
+  if (!item || !item.url) {
     throw new Error("Image API returned no data");
   }
+  const dl = await downloadBuffer(item.url, { signal });
   return {
-    b64: item.b64_json,
-    mimeType: item.mime_type || "image/png",
+    b64: dl.buf.toString("base64"),
+    mimeType: item.mime_type || dl.mimeType || "image/png",
     model,
   };
 }
 
+const VIDEO_POLL_MS = 5000;
+const VIDEO_TIMEOUT_MS = 5 * 60 * 1000;
+
 /**
- * Best-effort video generation. xAI video models differ by account —
- * try /v1/videos/generations then fall back to clear error.
+ * Wideo jest asynchroniczne: POST oddaje SAM request_id (HTTP 200, bez url),
+ * a gotowy plik trzeba odpytać. GET /v1/videos/{id} daje 202 + {status:"pending",
+ * progress} dopóki leci, potem {status:"done", video:{url,duration}}.
+ * onProgress(procent) leci do UI przy każdym odpytaniu.
+ * returns { kind:"video", b64, mimeType, url, duration, model }
  */
 async function generateVideo(
   token,
-  { prompt, model = "grok-imagine-video", aspect_ratio = "16:9", signal = null }
-) {
-  const attempts = [
-    {
-      path: "/v1/videos/generations",
-      body: {
-        model,
-        prompt,
-        aspect_ratio,
-      },
-    },
-    {
-      path: "/v1/images/generations",
-      body: {
-        model: "grok-imagine-image",
-        prompt: `[VIDEO STORYBOARD FRAME] ${prompt}`,
-        n: 1,
-        response_format: "b64_json",
-        aspect_ratio: aspect_ratio || "16:9",
-      },
-      storyboardFallback: true,
-    },
-  ];
-  let lastErr = null;
-  for (const a of attempts) {
-    try {
-      const res = await apiRequest(token, a.path, a.body, {
-        timeoutMs: 300000,
-        signal,
-      });
-      if (a.storyboardFallback) {
-        const item = res && res.data && res.data[0];
-        if (!item || !item.b64_json) throw new Error("no frame");
-        return {
-          kind: "storyboard",
-          b64: item.b64_json,
-          mimeType: item.mime_type || "image/png",
-          model: "grok-imagine-image",
-          note:
-            "Pełne wideo API niedostępne na tym koncie — wygenerowałem klatkę storyboard (image).",
-        };
-      }
-      // video response shapes vary
-      const item = (res && res.data && res.data[0]) || res;
-      const url = item.url || item.video_url;
-      const b64 = item.b64_json || item.video_b64;
-      return {
-        kind: "video",
-        url,
-        b64,
-        model,
-        raw: item,
-      };
-    } catch (err) {
-      lastErr = err;
-    }
+  {
+    prompt,
+    model = "grok-imagine-video",
+    aspect_ratio = "16:9",
+    signal = null,
+    onProgress = null,
   }
-  throw lastErr || new Error("Video generation failed");
+) {
+  const start = await apiRequest(
+    token,
+    "/v1/videos/generations",
+    { model, prompt, aspect_ratio },
+    { timeoutMs: 120000, signal }
+  );
+  const requestId = start && (start.request_id || start.id);
+  if (!requestId) {
+    throw new Error(
+      `Video API nie zwróciło request_id: ${JSON.stringify(start).slice(0, 200)}`
+    );
+  }
+
+  const deadline = Date.now() + VIDEO_TIMEOUT_MS;
+  let job = null;
+  let first = true;
+  while (Date.now() < deadline) {
+    // pierwsze odpytanie od razu: krótkie zlecenia bywają gotowe zanim
+    // minie pełne okno pollingu
+    if (first) first = false;
+    else await sleep(VIDEO_POLL_MS, signal);
+    job = await apiRequest(token, `/v1/videos/${requestId}`, null, {
+      method: "GET",
+      timeoutMs: 60000,
+      signal,
+    });
+    const st = job && job.status;
+    if (st === "done" || (job && job.video && job.video.url)) break;
+    if (st === "failed" || st === "error" || (job && job.error)) {
+      throw new Error(
+        `Generowanie wideo nie powiodło się: ${JSON.stringify(job).slice(0, 200)}`
+      );
+    }
+    if (typeof onProgress === "function") {
+      onProgress(Math.round(Number(job && job.progress) || 0));
+    }
+    job = null;
+  }
+
+  const url = job && job.video && job.video.url;
+  if (!url) {
+    throw new Error(
+      `Wideo nie zdążyło się wygenerować w ${VIDEO_TIMEOUT_MS / 1000} s (request_id=${requestId})`
+    );
+  }
+  const dl = await downloadBuffer(url, { signal });
+  return {
+    kind: "video",
+    b64: dl.buf.toString("base64"),
+    mimeType: dl.mimeType.startsWith("video/") ? dl.mimeType : "video/mp4",
+    url,
+    duration: job.video.duration,
+    model,
+  };
 }
 
 /**
@@ -339,6 +408,7 @@ function stripImageCommand(text) {
 
 module.exports = {
   getAccessToken,
+  downloadBuffer,
   listModels,
   chatCompletions,
   chatCompletionsStream,
