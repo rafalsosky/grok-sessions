@@ -153,6 +153,8 @@ const PL = {
   "New Home chat": "Nowy czat Home",
   "New Build session — write below": "Nowa sesja Build — pisz poniżej",
   "working…": "pracuje…",
+  "Working in this session": "Pracuje w tej sesji",
+  "Home (no signals)": "Home (brak signals)",
 
   // Uprawnienia
   Auto: "Auto",
@@ -173,6 +175,10 @@ const PL = {
   Cancel: "Anuluj",
   Saved: "Zapisane",
   "Log in": "Zaloguj",
+  "Switch account": "Zmień konto",
+  "Sign in with: grok login": "Zaloguj przez: grok login",
+  "Sign in again, e.g. with a different account":
+    "Zaloguj ponownie, np. na inne konto",
   Account: "Konto",
   Close: "Zamknij",
   Theme: "Motyw",
@@ -204,6 +210,7 @@ const PL = {
   "Signed in": "Zalogowano",
   "Not signed in": "Nie zalogowano",
   "account hidden": "konto ukryte",
+  "signed in": "zalogowano",
   "Account details hidden (privacy mode)":
     "Dane konta ukryte (tryb prywatności)",
   "Not signed in. Use „Log in”.": "Nie zalogowano. Użyj „Zaloguj”.",

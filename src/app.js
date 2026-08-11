@@ -246,15 +246,15 @@
       if (/\b(python3?|node|bash|zsh|sh|curl|ffmpeg|osascript)\b/.test(low))
         return "Terminal";
       if (/^read\b|\bread_file\b|\bcat\b|\bhead\b|\btail\b/.test(low))
-        return "Czytam plik";
+        return tr("Reading file");
       if (/\b(write|edit|patch|search_replace|sed)\b/.test(low)) return tr("Editing file");
       if (/\b(grep|rg|find|search_tool|web_search)\b/.test(low)) return "Szukam";
       if (/\b(web_search|browse|http|open_page)\b/.test(low)) return tr("Network");
       if (/^Execute\b/i.test(s)) return "Terminal";
-      if (/\/|\\/.test(s)) return "Plik";
+      if (/\/|\\/.test(s)) return tr("File");
       return tr("Tool");
     }
-    if (/^\/Users\//.test(s) || /^[A-Za-z]:\\/.test(s)) return "Plik";
+    if (/^\/Users\//.test(s) || /^[A-Za-z]:\\/.test(s)) return tr("File");
     const one = s.replace(/\s+/g, " ").slice(0, 40);
     return one.length < s.replace(/\s+/g, " ").length ? one + "…" : one;
   }
@@ -392,7 +392,7 @@
     const done = liveTools.filter((t) => t.status === "completed" || t.status === "failed");
     el.btnToggleActivity.classList.toggle("hidden", liveTools.length === 0);
     el.btnToggleActivity.textContent = showActivity
-      ? "Ukryj kroki"
+      ? tr("Hide steps")
       : `Kroki (${liveTools.length})`;
 
     if (!showActivity || !liveTools.length) {
@@ -566,7 +566,7 @@
       li.className = "session-item";
       li.style.cursor = "default";
       li.innerHTML = `<div><div class="title" style="color:var(--faint)">${
-        mode === "home" ? tr("No Home chats yet — write below") : "Brak sesji Build"
+        mode === "home" ? tr("No Home chats yet — write below") : tr("No Build sessions")
       }</div></div>`;
       el.list.appendChild(li);
       return;
@@ -604,7 +604,7 @@
             ${fl.unread ? '<span class="unread-dot" title="Unread"></span>' : ""}
             ${
               isWorking
-                ? '<span class="live-dot working" title="Pracuje w tej sesji"></span>'
+                ? '<span class="live-dot working" title=tr("Working in this session")></span>'
                 : isTerminalLive
                   ? '<span class="live-dot" title="Aktywna w terminalu"></span>'
                   : ""
@@ -614,7 +614,7 @@
         li.querySelector(".meta").textContent = [
           mode === "home" ? "Home" : basenameCwd(r.cwd),
           isWorking
-            ? "pracuje…"
+            ? tr("working…")
             : relativeTime(r.lastActiveAt || r.updatedAt),
         ]
           .filter(Boolean)
@@ -883,7 +883,7 @@
       pill.className =
         "agent-work-summary" + (m._streaming && busy ? " live" : "");
       pill.textContent =
-        m._streaming && busy ? "Thinking…" : "Thinking (ukryte w czacie)";
+        m._streaming && busy ? "Thinking…" : tr("Thinking (hidden in chat)");
       body.appendChild(pill);
     }
 
@@ -977,7 +977,7 @@
       q.className = "queued-actions";
       const badge = document.createElement("span");
       badge.className = "queued-badge";
-      badge.textContent = "w kolejce";
+      badge.textContent = tr("queued");
       const inject = document.createElement("button");
       inject.type = "button";
       inject.className = "queued-inject";
@@ -1219,14 +1219,32 @@
   let homeDirPath = "";
   let lastSystemLocale = "en";
 
+  /**
+   * Przycisk logowania mówił „Log in” także wtedy, gdy użytkownik był
+   * zalogowany. `grok login` służy wtedy do przelogowania, więc etykieta
+   * ma to odzwierciedlać zamiast sugerować, że sesji nie ma.
+   */
+  function paintLoginButtons(loggedIn) {
+    const label = loggedIn ? tr("Switch account") : tr("Log in");
+    for (const id of ["account-login", "set-login"]) {
+      const b = document.getElementById(id);
+      if (!b) continue;
+      b.textContent = label;
+      b.title = loggedIn
+        ? tr("Sign in again, e.g. with a different account")
+        : tr("Sign in with: grok login");
+    }
+  }
+
   function applyAccount(account) {
     if (account) lastAccount = account;
     const acc = lastAccount;
     if (!acc) return;
 
     if (privacyMode) {
-      el.accountName.textContent = acc.loggedIn ? "Zalogowano" : "Nie zalogowano";
-      el.accountSub.textContent = acc.loggedIn ? "konto ukryte" : "—";
+      paintLoginButtons(acc.loggedIn);
+      el.accountName.textContent = acc.loggedIn ? tr("Signed in") : tr("Not signed in");
+      el.accountSub.textContent = acc.loggedIn ? tr("account hidden") : "—";
       el.accountAvatar.textContent = "•";
       el.accountDetail.textContent = acc.loggedIn
         ? tr("Account details hidden (privacy mode)")
@@ -1234,16 +1252,17 @@
       return;
     }
 
+    paintLoginButtons(acc.loggedIn);
     el.accountName.textContent = acc.name || acc.label || "—";
     el.accountSub.textContent = acc.loggedIn
-      ? acc.email || "zalogowano"
-      : "Nie zalogowano";
+      ? acc.email || tr("signed in")
+      : tr("Not signed in");
     el.accountAvatar.textContent = (acc.name || acc.email || "?")
       .trim()
       .charAt(0)
       .toUpperCase();
     el.accountDetail.textContent = acc.loggedIn
-      ? `${acc.name || ""}\n${acc.email || ""}\nSesja SuperGrok / xAI`
+      ? `${acc.name || ""}\n${acc.email || ""}\n${tr("SuperGrok / xAI session")}`
       : tr("Not signed in. Use „Log in”.");
   }
 
@@ -1538,7 +1557,7 @@
       el.busyChip.classList.add("hidden");
       el.btnStop.classList.remove("hidden");
       el.btnSend.classList.add("queue-mode");
-      el.input.placeholder = "Agent pracuje w innej sesji Build…";
+      el.input.placeholder = tr("Agent is working in another Build session…");
       el.statusBar.classList.add("hidden");
     } else {
       setBusy(false, mode);
@@ -2069,7 +2088,7 @@
     el.btnSend.title = busy
       ? viewingBusySession
         ? tr("Add to queue (sends after the reply)")
-        : "Agent w innej sesji Build — Enter doda do kolejki"
+        : tr("Agent busy in another Build session — Enter queues the message")
       : "Send";
     el.btnSend.classList.toggle("queue-mode", busy);
     el.btnStop.classList.toggle("hidden", !busy);
@@ -2082,7 +2101,7 @@
     el.input.readOnly = false;
     if (busy && viewingBusySession) {
       el.input.placeholder =
-        "Pisz dalej — Enter doda do kolejki…";
+        tr("Keep typing — Enter adds to the queue…");
       // trzymaj „Myślę…” widoczne przez całą pracę, nawet bez nowego setStatus
       if (el.statusBar.classList.contains("hidden")) {
         const d = bag().statusDetail;
@@ -2093,10 +2112,10 @@
       }
     } else if (busy && !viewingBusySession) {
       el.input.placeholder =
-        "Agent pracuje w innej sesji Build…";
+        tr("Agent is working in another Build session…");
     } else {
       el.input.placeholder =
-        "Message Grok… (Enter = send, ⌘V = wklej screenshot)";
+        tr("Message Grok… (Enter = send, ⌘V = paste screenshot)");
     }
     updateQueueChip();
     if (!b) {
@@ -2659,7 +2678,7 @@
       q.className = "queued-actions";
       const badge = document.createElement("span");
       badge.className = "queued-badge";
-      badge.textContent = "w kolejce";
+      badge.textContent = tr("queued");
       const inject = document.createElement("button");
       inject.type = "button";
       inject.className = "queued-inject";
@@ -2765,7 +2784,7 @@
     }
     pushBag();
     persistNav();
-    showToast(mode === "home" ? "Nowy czat Home" : tr("New Build session — write below"), "ok");
+    showToast(mode === "home" ? tr("New Home chat") : tr("New Build session — write below"), "ok");
   }
 
   function autosize() {
@@ -2797,12 +2816,12 @@
       return;
     }
     if (!id) {
-      showToast("Wybierz czat z listy (albo New chat)", "");
+      showToast(tr("Pick a chat from the list (or New chat)"), "");
       return;
     }
     const row = rowsForMode().find((r) => r.id === id);
     if (!row && act !== "copy") {
-      showToast("Sesja nie znaleziona", "error");
+      showToast(tr("Session not found"), "error");
       return;
     }
 
@@ -2813,12 +2832,12 @@
     }
     if (act === "unread") {
       await markSessionFlag(id, { unread: true });
-      showToast("Oznaczone jako nieprzeczytane", "ok");
+      showToast(tr("Marked unread"), "ok");
       return;
     }
     if (act === "read") {
       await markSessionFlag(id, { unread: false });
-      showToast("Oznaczone jako przeczytane", "ok");
+      showToast(tr("Marked read"), "ok");
       return;
     }
     if (act === "pin") {
@@ -2904,7 +2923,7 @@
       el.input.placeholder = tr("Describe the video… (8 s, takes about a minute)");
     } else {
       el.input.placeholder =
-        "Message Grok… (Enter = send, ⌘V = wklej screenshot)";
+        tr("Message Grok… (Enter = send, ⌘V = paste screenshot)");
     }
   });
 
@@ -3182,7 +3201,7 @@
       el.busyChip.classList.add("hidden");
       el.btnStop.classList.remove("hidden");
       el.btnSend.classList.add("queue-mode");
-      el.input.placeholder = "Agent pracuje w innej sesji Build…";
+      el.input.placeholder = tr("Agent is working in another Build session…");
       el.statusBar.classList.add("hidden");
       el.statusText.textContent = "";
       liveTools = [];
@@ -3387,7 +3406,7 @@
           usageEls.btn.classList.remove("warn", "hot");
         }
         usageEls.ctxMeta.textContent =
-          mode === "home" ? "Home (brak signals)" : "—";
+          mode === "home" ? tr("Home (no signals)") : "—";
         setBar(usageEls.ctxBar, 0);
       }
       const used = u.context?.tokensUsed;
@@ -3397,7 +3416,7 @@
           used != null && total != null
             ? `${fmtTokens(used)} / ${fmtTokens(total)} · tury ${u.context?.turns ?? "—"} · tool ${u.context?.tools ?? "—"}`
             : mode === "home"
-              ? "Home nie zapisuje context window jak Build"
+              ? tr("Home does not track a context window like Build")
               : tr("No signals.json — open a Build session");
       }
       const planBit = plan?.tierLabel ? ` · ${plan.tierLabel}` : "";

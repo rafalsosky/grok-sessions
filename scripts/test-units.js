@@ -202,17 +202,33 @@ group("i18n: angielski bazowy, polski kompletny");
     );
   });
 
+  // Pierwsza wersja tego testu szukała tylko znaków ą/ć/ę/ł/…, więc
+  // przepuściła „Zalogowano”, „konto ukryte” i „⌘V = wklej screenshot”.
+  // Stąd druga siatka: typowo polskie słowa bez ogonków.
+  const POLSKIE_SLOWA =
+    /\b(zalogowano|konto|ukryte|ukryty|wklej|napisz|pisz|dalej|wyslij|jeszcze|sesji|sesja|czat|czaty|kolejce|kolejki|wiadomosc|wiadomosci|brak|pracuje|wybierz|nowy|nowa|usun|zmien|pokaz|ukryj|zrzut|ekranu|plik|pliki|teraz|przez|jako|albo|nieprzeczytane|przeczytane|znaleziona|zapisuje)\b/i;
+
   test("w kodzie UI nie ma polskich literałów", () => {
     const zle = [];
     for (const [plik, src] of [
       ["src/app.js", app],
       ["src/index.html", html],
     ]) {
-      // stringi i widoczne teksty z polskimi znakami = niezlokalizowane
-      const hits = src.match(/"[^"\n]*[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ][^"\n]*"/g) || [];
-      for (const h of hits) if (!h.startsWith('"t(')) zle.push(`${plik}: ${h}`);
+      const hits = src.match(/"[^"\n]{3,}"/g) || [];
+      for (const h of hits) {
+        const tekst = h.slice(1, -1);
+        // pomiń wywołania tłumaczeń i klucze data-i18n (te są po angielsku)
+        if (h.startsWith('"tr(')) continue;
+        const podejrzany =
+          /[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ]/.test(tekst) || POLSKIE_SLOWA.test(tekst);
+        if (podejrzany) zle.push(`${plik}: ${h.slice(0, 70)}`);
+      }
     }
-    assert.strictEqual(zle.length, 0, zle.slice(0, 8).join("\n       "));
+    assert.strictEqual(
+      zle.length,
+      0,
+      "niezlokalizowane teksty:\n       " + zle.slice(0, 10).join("\n       ")
+    );
   });
 }
 
