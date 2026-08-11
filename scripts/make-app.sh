@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/bash
 # Buduje klikalną aplikację .app dla macOS.
 #
 # Ścieżka do projektu jest liczona w locie z położenia tego skryptu, więc
@@ -11,7 +11,8 @@
 
 set -euo pipefail
 
-PROJECT_DIR="${0:A:h:h}"
+# Katalog projektu liczony z położenia skryptu (działa też przez `npm run`)
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="$(node -p "require('$PROJECT_DIR/package.json').productName || 'SuperGrok Desktop'")"
 VERSION="$(node -p "require('$PROJECT_DIR/package.json').version || '0.0.0'")"
 DEST_DIR="${1:-$HOME/Applications}"
