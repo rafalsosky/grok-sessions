@@ -16,3 +16,9 @@ coverage/
 *.local
 tmp/
 .cache/
+
+# lokalne ustawienia i sesje (na wypadek skopiowania do repo)
+settings.json
+session-flags.json
+home-chats/
+attachments/
