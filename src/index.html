@@ -20,7 +20,7 @@
         <div class="rail-top drag">
           <div class="brand-row no-drag">
             <div class="brand-mark" aria-hidden="true">✦</div>
-            <span class="brand-word" title="SuperGrok Desktop SoskyApp">SoskyApp</span>
+            <span class="brand-word" title="SuperGrok Desktop SoskyApp">SuperGrok Desktop SoskyApp</span>
             <button type="button" id="btn-collapse" class="icon-ghost" title="Zwiń">‹</button>
           </div>
           <div class="mode-tabs no-drag" role="tablist">
@@ -137,10 +137,11 @@
             </div>
             <div class="composer-bottom">
               <div class="composer-left">
-                <button type="button" id="perm-mode-btn" class="chip mode-auto" title="Tryb uprawnień narzędzi (jak Auto w Claude). Ta apka: zawsze zatwierdzaj.">
+                <button type="button" id="perm-mode-btn" class="chip mode-auto" title="Tryb uprawnień narzędzi. Kliknij, żeby przełączyć Auto / Pytaj.">
                   Auto
                 </button>
-                <span id="busy-chip" class="chip busy hidden">Working…</span>
+                <!-- Working chip usunięty — status = pasek „Myślę…” nad composerem -->
+                <span id="busy-chip" class="chip busy hidden" hidden aria-hidden="true"></span>
                 <span id="cwd-chip" class="chip path">Home chat</span>
               </div>
               <div class="composer-right">
@@ -185,23 +186,6 @@
               <div class="usage-row subtle">
                 <span id="usage-ctx-tokens">—</span>
               </div>
-              <div class="usage-sep"></div>
-              <div class="usage-row">
-                <span class="usage-label">API rate limit</span>
-                <span class="usage-meta" id="usage-rate-meta">—</span>
-              </div>
-              <div class="usage-bar-track"><div class="usage-bar-fill rate" id="usage-rate-bar"></div></div>
-              <div class="usage-row subtle">
-                <span id="usage-req-meta">—</span>
-              </div>
-              <div class="usage-sep"></div>
-              <div class="usage-row">
-                <span class="usage-label">Terminal</span>
-                <span class="usage-meta" id="usage-term-meta">—</span>
-              </div>
-              <div class="usage-row subtle">
-                <span id="usage-session-meta">—</span>
-              </div>
               <div class="usage-foot" id="usage-account">—</div>
             </div>
           </div>
@@ -244,6 +228,15 @@
       </div>
     </div>
 
+    <div id="perm-modal" class="modal hidden" role="dialog" aria-label="Zgoda na narzędzie">
+      <div class="modal-card">
+        <h2>Agent prosi o zgodę</h2>
+        <p id="perm-tool" class="perm-tool">—</p>
+        <pre id="perm-detail" class="perm-detail"></pre>
+        <div class="modal-actions" id="perm-actions"></div>
+      </div>
+    </div>
+
     <div id="settings-modal" class="modal hidden" role="dialog">
       <div class="modal-card settings-card">
         <h2>Settings</h2>
@@ -260,12 +253,47 @@
         </label>
         <label class="field check">
           <input type="checkbox" id="set-subagents" />
-          <span>Show subagents in Build Recents</span>
+          <span>Pokaż subagentów na liście Build</span>
         </label>
+
+        <label class="field">
+          <span>Motyw</span>
+          <select id="set-theme" class="input">
+            <option value="dark">Ciemny</option>
+            <option value="light">Jasny</option>
+            <option value="auto">Jak system</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Uprawnienia narzędzi agenta (Build)</span>
+          <select id="set-permission" class="input">
+            <option value="auto">Auto — agent działa bez pytania</option>
+            <option value="ask">Pytaj — zatwierdzam każde narzędzie</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>Maksymalna długość odpowiedzi w Home (tokeny)</span>
+          <input type="number" id="set-max-tokens" class="input" min="1024" max="32768" step="512" />
+        </label>
+
+        <label class="field check">
+          <input type="checkbox" id="set-cookies" />
+          <span>
+            Czytaj ciasteczka grok.com z Arc/Chrome (tygodniowy % zużycia).
+            Wymaga Pythona z modułem <code>rookiepy</code>. Domyślnie wyłączone.
+          </span>
+        </label>
+        <label class="field" id="python-field">
+          <span>Ścieżka do Pythona z rookiepy (puste = szukaj w PATH)</span>
+          <input type="text" id="set-python" class="input" placeholder="np. /opt/homebrew/bin/python3" />
+        </label>
+
         <div class="modal-actions">
-          <button type="button" id="set-login" class="btn">Log in</button>
-          <button type="button" id="set-cancel" class="btn">Cancel</button>
-          <button type="button" id="set-save" class="btn primary">Save</button>
+          <button type="button" id="set-login" class="btn">Zaloguj</button>
+          <button type="button" id="set-cancel" class="btn">Anuluj</button>
+          <button type="button" id="set-save" class="btn primary">Zapisz</button>
         </div>
       </div>
     </div>

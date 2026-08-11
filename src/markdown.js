@@ -27,8 +27,13 @@ function normalizeMarkdown(src) {
   // Double-pipe row breaks (common in glued tables): ||---| or || cell
   t = t.replace(/\|\|/g, "|\n|");
 
-  // Separator row alone
-  t = t.replace(/\|(\s*:?-{3,}:?\s*\|)+/g, (m) => "\n" + m.trim() + "\n");
+  // Wiersz separatora (|---|---|) na własną linię, ale TYLKO gdy jest
+  // sklejony z czymś innym. Poprzednia wersja dopisywała \n także wtedy,
+  // gdy separator już stał osobno — powstawały puste linie, które dzieliły
+  // poprawną tabelę na trzy bloki i „|---|---|” lądowało w czacie jako tekst.
+  const SEP = /\|(?:\s*:?-{3,}:?\s*\|)+/;
+  t = t.replace(new RegExp(`([^\\n])(${SEP.source})`, "g"), "$1\n$2");
+  t = t.replace(new RegExp(`(${SEP.source})([^\\n])`, "g"), "$1\n$2");
 
   // Ensure each table row on own line when multiple | segments
   // (already partly handled by ||)
@@ -115,14 +120,23 @@ function renderMarkdown(src) {
   if (!src) return "";
   let text = normalizeMarkdown(src);
 
+  // Niedomknięty fence w trakcie streamu: domknij, żeby kod nie wyciekał
+  // do tekstu jako ściana backticków.
+  const fenceCount = (text.match(/```/g) || []).length;
+  if (fenceCount % 2 === 1) text += "\n```";
+
   // Fenced code
   const blocks = [];
   text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
     const i = blocks.length;
+    const label = escapeHtml(lang || "text");
     blocks.push(
-      `<pre class="md-code"><code class="lang-${escapeHtml(
-        lang || "text"
-      )}">${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`
+      `<div class="md-code-wrap"><div class="md-code-head">` +
+        `<span class="md-code-lang">${label}</span>` +
+        `<button type="button" class="md-copy">Copy</button>` +
+        `</div><pre class="md-code"><code class="lang-${label}">${escapeHtml(
+          code.replace(/\n$/, "")
+        )}</code></pre></div>`
     );
     return `\n\n\u0000BLOCK${i}\u0000\n\n`;
   });

@@ -25,6 +25,8 @@
   /** Home: chat | image | video */
   let homeKind = "chat";
   let effortLevel = "high";
+  /** "auto" = agent bez pytania, "ask" = zatwierdzam każde narzędzie */
+  let permMode = "auto";
   /** Session ID where agent is currently working (only that row shows „pracuje”) */
   let busySessionId = null;
   /** { [sessionId]: { unread, pinned } } */
@@ -246,6 +248,38 @@
     return one.length < s.replace(/\s+/g, " ").length ? one + "…" : one;
   }
 
+  /* ===== Stoper tury: „Myślę… 0:42” ===== */
+  let turnStartedAt = 0;
+  let turnTimer = 0;
+  let lastStatusLabel = "";
+
+  function fmtElapsed(ms) {
+    const s = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(s / 60);
+    return m > 0 ? `${m}:${String(s % 60).padStart(2, "0")}` : `${s}s`;
+  }
+
+  function paintStatusText() {
+    if (!el.statusText) return;
+    const base = lastStatusLabel || "Myślę…";
+    el.statusText.textContent = turnStartedAt
+      ? `${base} · ${fmtElapsed(Date.now() - turnStartedAt)}`
+      : base;
+  }
+
+  function startTurnTimer() {
+    if (turnTimer) return;
+    turnStartedAt = Date.now();
+    paintStatusText();
+    turnTimer = setInterval(paintStatusText, 1000);
+  }
+
+  function stopTurnTimer() {
+    if (turnTimer) clearInterval(turnTimer);
+    turnTimer = 0;
+    turnStartedAt = 0;
+  }
+
   function setStatus(phase, detail, forMode, opts = {}) {
     const target = forMode || mode;
     const b = bags[target];
@@ -331,12 +365,14 @@
       if (!busy) {
         el.statusBar.classList.add("hidden");
       } else {
-        el.statusText.textContent = label || "Working…";
+        lastStatusLabel = label || "Myślę…";
+        paintStatusText();
         el.statusBar.classList.remove("hidden");
       }
       return;
     }
-    el.statusText.textContent = label;
+    lastStatusLabel = label;
+    paintStatusText();
     el.statusBar.classList.remove("hidden");
   }
 
@@ -594,6 +630,9 @@
 
   /** User scrolled up while agent works → nie ciągnij na dół. */
   let stickToBottom = true;
+  /** True podczas programowego scrolla — handler nie gasi stickToBottom. */
+  let scrollingProgrammatically = false;
+  let scrollBottomTimer = 0;
 
   function nearBottom(threshold = 120) {
     const box = el.chatScroll;
@@ -611,15 +650,80 @@
     return nearBottom(120);
   }
 
-  function scrollChatToBottom(_force) {
+  /**
+   * @param {boolean} [force] — true = Enter / nowa tura (zawsze na dół)
+   * NIE używamy scrollIntoView — potrafi scrollować zły kontener i skakać na górę.
+   * Tylko scrollTop na #chat-scroll.
+   */
+  function scrollChatToBottom(force) {
     const box = el.chatScroll;
     if (!box) return;
-    // tylko gdy user trzyma dół (albo właśnie wysłał → stickToBottom=true)
-    if (!stickToBottom) return;
-    const prev = box.style.scrollBehavior;
-    box.style.scrollBehavior = "auto";
-    box.scrollTop = box.scrollHeight;
-    box.style.scrollBehavior = prev || "";
+    if (!force && !stickToBottom) return;
+    if (force) stickToBottom = true;
+
+    scrollingProgrammatically = true;
+    const go = () => {
+      const b = el.chatScroll;
+      if (!b) return;
+      // max scroll — nie polegaj na scrollHeight w trakcie flex layout
+      const max = Math.max(0, b.scrollHeight - b.clientHeight);
+      b.scrollTop = max > 0 ? max : b.scrollHeight;
+    };
+    go();
+    // layout po replaceChildren bywa o 1–2 klatki opóźniony
+    requestAnimationFrame(() => {
+      go();
+      requestAnimationFrame(() => {
+        go();
+        scrollingProgrammatically = false;
+        stickToBottom = true;
+      });
+    });
+    // belka: po fontach / markdown height może urosnąć później
+    if (scrollBottomTimer) clearTimeout(scrollBottomTimer);
+    scrollBottomTimer = setTimeout(() => {
+      scrollBottomTimer = 0;
+      if (!force && !stickToBottom) return;
+      scrollingProgrammatically = true;
+      go();
+      scrollingProgrammatically = false;
+    }, 50);
+  }
+
+  /**
+   * Dociąga dół dopóki wysokość treści rośnie (max ~1.2 s).
+   * Pojedynczy scroll po renderze nie wystarczał: tabele, obrazy i fonty
+   * dochodzą później i widok zostawał w połowie historii.
+   */
+  let settleTimer = 0;
+  function settleScrollToBottom() {
+    if (settleTimer) clearInterval(settleTimer);
+    let lastH = -1;
+    let stable = 0;
+    let ticks = 0;
+    settleTimer = setInterval(() => {
+      const msgs = el.messages;
+      const box = el.chatScroll;
+      if (!msgs || !box) {
+        clearInterval(settleTimer);
+        settleTimer = 0;
+        return;
+      }
+      const h = msgs.scrollHeight;
+      if (h === lastH) stable++;
+      else stable = 0;
+      lastH = h;
+      if (stickToBottom) {
+        layoutChatBottom();
+        scrollingProgrammatically = true;
+        box.scrollTop = Math.max(0, box.scrollHeight - box.clientHeight);
+        scrollingProgrammatically = false;
+      }
+      if (++ticks > 20 || stable >= 3) {
+        clearInterval(settleTimer);
+        settleTimer = 0;
+      }
+    }, 60);
   }
 
   function bindChatScrollWatcher() {
@@ -629,10 +733,47 @@
     box.addEventListener(
       "scroll",
       () => {
+        if (scrollingProgrammatically) return;
         // blisko dołu → znowu follow; wyżej → nie ruszaj
         stickToBottom = nearBottom(80);
       },
       { passive: true }
+    );
+    // BUG (naprawiony): obserwowany był #chat-scroll, czyli kontener o stałej
+    // wysokości. Gdy rosła TREŚĆ (markdown, tabele, obrazy z readPreview,
+    // fonty), nic się nie przeliczało i widok zostawał w połowie historii,
+    // dopóki użytkownik nie ruszył scrolla ręcznie. Obserwujemy #messages.
+    if (typeof ResizeObserver !== "undefined" && !box._layoutRo) {
+      box._layoutRo = new ResizeObserver(() => {
+        if (!allMessages.length) return;
+        layoutChatBottom();
+        // treść urosła, a user trzymał dół → dociągnij
+        if (stickToBottom) {
+          scrollingProgrammatically = true;
+          const b = el.chatScroll;
+          if (b) b.scrollTop = Math.max(0, b.scrollHeight - b.clientHeight);
+          requestAnimationFrame(() => {
+            scrollingProgrammatically = false;
+          });
+        }
+      });
+      box._layoutRo.observe(box);
+      if (el.messages) box._layoutRo.observe(el.messages);
+    }
+  }
+
+  /**
+   * Obrazy dochodzą asynchronicznie (IPC + base64) i rosną PO ustawieniu
+   * scrollTop. Bez tego widok zostawał nad ostatnią wiadomością.
+   */
+  function stickAfterImage(img) {
+    img.addEventListener(
+      "load",
+      () => {
+        layoutChatBottom();
+        if (stickToBottom) scrollChatToBottom(false);
+      },
+      { once: true }
     );
   }
 
@@ -690,42 +831,14 @@
     }
     const typing = last.querySelector(".typing");
     if (typing && safe) typing.remove();
+    // wysokość bańki rośnie → przelicz padding krótkiego czatu
+    if (allMessages.length && allMessages.length <= 4) layoutChatBottom();
     // tylko gdy user trzyma dół
     if (stickToBottom && nearBottom(160)) {
       scrollChatToBottom(true);
     }
   }
 
-  function patchThinking(m) {
-    if (!m) return;
-    let last = findLastAssistantRow();
-    if (!last) {
-      appendMessageRows([m], { stick: true });
-      return;
-    }
-    let det = last.querySelector("details.thinking");
-    if (!det) {
-      det = document.createElement("details");
-      det.className = "thinking";
-      det.open = true;
-      const sum = document.createElement("summary");
-      sum.textContent = "Thinking…";
-      const tb = document.createElement("div");
-      tb.className = "thinking-body";
-      det.appendChild(sum);
-      det.appendChild(tb);
-      const body = last.querySelector(".msg-body");
-      const label = body?.querySelector(".msg-label");
-      if (body && label) label.after(det);
-      else body?.prepend(det);
-    }
-    const tb = det.querySelector(".thinking-body");
-    if (tb) tb.textContent = (m.thinking || "").slice(0, 3000);
-    const sum = det.querySelector("summary");
-    if (sum) sum.textContent = busy ? "Thinking…" : "Thinking";
-    det.open = Boolean(busy);
-    if (stick) el.chatScroll.scrollTop = el.chatScroll.scrollHeight;
-  }
 
   /** Jedna bańka DOM — używane do full render i do append bez wipe. */
   function buildMessageRow(m) {
@@ -791,10 +904,12 @@
       for (const img of m.images) {
         const im = document.createElement("img");
         im.className = "msg-image";
+        im.loading = "lazy";
+        stickAfterImage(im);
         if (img.b64) {
           im.src = `data:${img.mimeType || "image/png"};base64,${img.b64}`;
         } else if (img.path) {
-          im.alt = img.path;
+          im.alt = img.name || "obraz";
           api.readPreview(img.path).then((r) => {
             if (r.ok) im.src = r.dataUrl;
           });
@@ -853,44 +968,106 @@
 
     const actions = document.createElement("div");
     actions.className = "msg-actions";
-    const copyBtn = document.createElement("button");
-    copyBtn.type = "button";
-    copyBtn.textContent = "Copy";
-    copyBtn.onclick = async () => {
+
+    const mkBtn = (label, title, fn) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.title = title;
+      b.onclick = fn;
+      actions.appendChild(b);
+      return b;
+    };
+
+    mkBtn("Copy", "Skopiuj treść wiadomości", async () => {
       try {
         const clean =
           m.role === "user"
             ? cleanUserText(m.text || "")
             : cleanAssistantText(m.text || "");
         await navigator.clipboard.writeText(clean || m.text || "");
-        showToast("Copied", "ok");
+        showToast("Skopiowane", "ok");
       } catch {
-        showToast("Copy failed", "error");
+        showToast("Nie udało się skopiować", "error");
       }
-    };
-    actions.appendChild(copyBtn);
+    });
+
+    if (!m._queued) {
+      if (m.role === "user") {
+        mkBtn("Edytuj", "Wróć do tej wiadomości i wyślij poprawioną", () =>
+          editMessage(m)
+        );
+      }
+      mkBtn(
+        "Ponów",
+        m.role === "user"
+          ? "Wyślij tę wiadomość jeszcze raz"
+          : "Wygeneruj odpowiedź jeszcze raz",
+        () => retryFrom(m)
+      );
+      mkBtn(
+        "Usuń",
+        mode === "grok"
+          ? "Usuwa z widoku. Agent nadal pamięta tę turę w swojej sesji."
+          : "Usuwa z widoku czatu",
+        () => deleteMessage(m)
+      );
+    }
+
     body.appendChild(actions);
     row.appendChild(body);
     return row;
   }
 
-  /** Doklej bańki — scroll TYLKO gdy stickToBottom (user na dole / właśnie wysłał). */
+  /**
+   * Krótki czat: padding-top = wolne px w #chat-scroll → bańki przy composerze.
+   * Bez min-height:100% (to dawało scrollbar przy 1 wiadomości).
+   */
+  function layoutChatBottom() {
+    const box = el.chatScroll;
+    const msgs = el.messages;
+    if (!box || !msgs) return;
+    if (!allMessages.length) {
+      msgs.style.paddingTop = "";
+      return;
+    }
+    // zmierz treść bez sztucznego paddingu
+    msgs.style.paddingTop = "0px";
+    const cs = getComputedStyle(box);
+    const padY =
+      (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const available = Math.max(0, box.clientHeight - padY);
+    const contentH = msgs.scrollHeight;
+    const gap = Math.floor(available - contentH);
+    msgs.style.paddingTop = gap > 1 ? `${gap}px` : "0px";
+  }
+
+  function pinMessagesBottom(on) {
+    if (!on) {
+      el.messages.style.paddingTop = "";
+      return;
+    }
+    layoutChatBottom();
+  }
+
+  /** Doklej bańki na KONIEC .messages. */
   function appendMessageRows(msgs, { stick = false } = {}) {
     if (!msgs || !msgs.length) return;
     el.homeHero.classList.add("hidden");
     if (stick) stickToBottom = true;
     for (const m of msgs) {
-      if (m.role === "user" && hasUserTextAlready(m.text) && !m._local) continue;
-      if (m.role === "user" && m._local) {
-        const exists = [...el.messages.querySelectorAll(".msg.user .msg-content")].some(
-          (n) => normUserText(n.textContent) === normUserText(m.text)
-        );
-        if (exists) continue;
+      // po id — nigdy nie blokuj drugiego „dzień dobry” w tej samej sesji
+      if (m.id) {
+        const sel = `[data-msg-id="${String(m.id).replace(/"/g, "")}"]`;
+        if (el.messages.querySelector(sel)) continue;
       }
+      // echo ACP (bez _local): nie doklejaj tego samego tekstu usera drugi raz
+      if (m.role === "user" && !m._local && hasUserTextAlready(m.text)) continue;
+      // zawsze na koniec DOM = dół listy
       el.messages.appendChild(buildMessageRow(m));
     }
-    dedupeTrailingUserMessages();
-    if (stickToBottom) scrollChatToBottom();
+    layoutChatBottom();
+    if (stick || stickToBottom) scrollChatToBottom(!!stick);
   }
 
   function renderMessages(opts = {}) {
@@ -904,11 +1081,7 @@
     const prevTop = box ? box.scrollTop : 0;
     const stickBottom = forceScroll || stickToBottom;
 
-    if (box) {
-      box.style.visibility = "hidden";
-      box.style.pointerEvents = "none";
-    }
-
+    // NIE chowaj visibility — to dawało skok na górę (scrollHeight=0)
     const frag = document.createDocumentFragment();
     const hasMsgs = allMessages.length > 0;
     el.homeHero.classList.toggle("hidden", hasMsgs);
@@ -919,10 +1092,18 @@
       more.className = "load-more";
       more.textContent = `Load earlier (${allMessages.length - messages.length})`;
       more.onclick = () => {
+        const box2 = el.chatScroll;
+        const oldH = box2 ? box2.scrollHeight : 0;
+        const oldT = box2 ? box2.scrollTop : 0;
         visibleCount = Math.min(allMessages.length, visibleCount + PAGE);
         syncVisibleMessages();
         stickToBottom = false;
         renderMessages({ force: true });
+        // zachowaj miejsce czytania po dołożeniu starszych
+        if (box2) {
+          const d = box2.scrollHeight - oldH;
+          box2.scrollTop = oldT + d;
+        }
       };
       frag.appendChild(more);
     }
@@ -931,36 +1112,26 @@
       frag.appendChild(buildMessageRow(m));
     }
 
+    // programowy scroll: nie pozwól watcherowi zgasić stick w trakcie wipe
+    scrollingProgrammatically = true;
     el.messages.replaceChildren(frag);
+    // krótki czat: padding-top zamiast min-height (bez fałszywego scrollbara)
+    layoutChatBottom();
     if (box) {
-      box.scrollTop = stickBottom ? box.scrollHeight : prevTop;
-      void box.offsetHeight;
-      box.style.visibility = "";
-      box.style.pointerEvents = "";
+      if (stickBottom) {
+        // natychmiast — zanim browser zostawi scrollTop=0
+        const max = Math.max(0, box.scrollHeight - box.clientHeight);
+        box.scrollTop = max > 0 ? max : box.scrollHeight;
+        scrollChatToBottom(true);
+      } else {
+        box.scrollTop = prevTop;
+        scrollingProgrammatically = false;
+      }
+    } else {
+      scrollingProgrammatically = false;
     }
-    requestAnimationFrame(() => {
-      if (!el.chatScroll) return;
-      if (stickBottom) scrollChatToBottom();
-      else el.chatScroll.scrollTop = prevTop;
-    });
   }
 
-  function toolCardEl(t, compact) {
-    const card = document.createElement("div");
-    card.className = "tool-card" + (compact ? " compact" : "");
-    card.innerHTML = `
-      <div class="tool-head">
-        <span class="tool-ico"></span>
-        <span class="tool-title"></span>
-        <span class="tool-status"></span>
-      </div>`;
-    card.querySelector(".tool-ico").textContent = toolIcon(t.title);
-    card.querySelector(".tool-title").textContent = humanizeToolTitle(
-      t.title || "tool"
-    );
-    card.querySelector(".tool-status").textContent = t.status || "";
-    return card;
-  }
 
   function renderAttachChips() {
     if (!attachments.length) {
@@ -1267,6 +1438,9 @@
     );
     syncVisibleMessages();
     renderMessages({ forceScroll: true });
+    // Wznowiona sesja: markdown i obrazy dorastają jeszcze przez chwilę po
+    // pierwszym renderze. Dociągnij dół, aż wysokość się ustabilizuje.
+    settleScrollToBottom();
 
     pushBag();
     persistNav();
@@ -1285,7 +1459,87 @@
       el.statusBar.classList.add("hidden");
     }
     el.input.focus();
-    if (typeof refreshUsage === "function") refreshUsage({ includeRate: false });
+    if (typeof refreshUsage === "function") refreshUsage();
+  }
+
+  /** Indeks wiadomości w allMessages po id. */
+  function indexOfMsg(m) {
+    if (!m) return -1;
+    return allMessages.findIndex((x) => x === m || (m.id && x.id === m.id));
+  }
+
+  /** Ostatnia wiadomość użytkownika przed indeksem i. */
+  function lastUserBefore(i) {
+    for (let k = i; k >= 0; k--) {
+      if (allMessages[k].role === "user") return allMessages[k];
+    }
+    return null;
+  }
+
+  /**
+   * Usuwa z WIDOKU. W trybie Build sesja agenta nadal pamięta tę turę —
+   * mówimy to wprost zamiast udawać cofnięcie.
+   */
+  function deleteMessage(m) {
+    const i = indexOfMsg(m);
+    if (i < 0) return;
+    allMessages.splice(i, 1);
+    syncVisibleMessages();
+    renderMessages({ force: true });
+    pushBag();
+    showToast(
+      mode === "grok"
+        ? "Usunięte z widoku (agent nadal to pamięta)"
+        : "Usunięte z widoku",
+      ""
+    );
+  }
+
+  /** Wstaw treść do composera i odetnij historię od tego miejsca (widok). */
+  function editMessage(m) {
+    if (busy) {
+      showToast("Najpierw zatrzymaj bieżącą turę (■)", "");
+      return;
+    }
+    const i = indexOfMsg(m);
+    if (i < 0) return;
+    el.input.value = cleanUserText(m.text || "");
+    autosize();
+    allMessages = allMessages.slice(0, i);
+    syncVisibleMessages();
+    renderMessages({ force: true });
+    pushBag();
+    el.input.focus();
+    showToast(
+      mode === "grok"
+        ? "Popraw i wyślij. Uwaga: agent pamięta poprzednią wersję."
+        : "Popraw i wyślij",
+      "ok"
+    );
+  }
+
+  /** Wyślij ponownie: z bańki usera tę samą, z bańki asystenta poprzedni prompt. */
+  async function retryFrom(m) {
+    if (busy) {
+      showToast("Najpierw zatrzymaj bieżącą turę (■)", "");
+      return;
+    }
+    const i = indexOfMsg(m);
+    if (i < 0) return;
+    const src = m.role === "user" ? m : lastUserBefore(i);
+    if (!src) {
+      showToast("Nie ma czego ponowić", "error");
+      return;
+    }
+    const text = cleanUserText(src.text || "");
+    const atts = (src.attachments || []).slice();
+    if (!text && !atts.length) return;
+    // odetnij od wiadomości źródłowej w dół — nowa odpowiedź zajmie jej miejsce
+    const from = indexOfMsg(src);
+    allMessages = allMessages.slice(0, from);
+    syncVisibleMessages();
+    renderMessages({ force: true });
+    await runSendTurn(text || "(załącznik)", atts, false);
   }
 
   function modalPrompt({ title, body, okLabel = "OK", inputValue = null }) {
@@ -1345,7 +1599,8 @@
     // tylko jeśli nie ma w DOM
     const last = el.messages.lastElementChild;
     if (!last || !last.classList.contains("assistant")) {
-      appendMessageRows([streamingAssistant], { stick: true });
+      // nie wymuszaj stick — nie skacz na dół / górę
+      appendMessageRows([streamingAssistant], { stick: false });
     }
     return streamingAssistant;
   }
@@ -1492,8 +1747,29 @@
       return;
     }
 
-    // Home albo obca sesja Build — zero zapisu do bieżącego allMessages/DOM
-    if (mode === "home" || !isViewingSession(sid)) {
+    // Home: jedna tura naraz, więc strumień z backendu należy do tego, co
+    // właśnie widać. Wcześniej lądował w buforze offscreen i Home wyglądał,
+    // jakby nic się nie działo aż do końca odpowiedzi.
+    if (mode === "home") {
+      if (!busy) return;
+      const update = params.update || params;
+      if (update.sessionUpdate !== "agent_message_chunk") return;
+      const chunk = (update.content && update.content.text) || "";
+      if (!chunk) return;
+      const a = ensureStreamingAssistant();
+      a.text += chunk;
+      setStatus("responding", "Piszę…", "home", { sessionId: sid });
+      if (!handleChatUpdate._raf) {
+        handleChatUpdate._raf = requestAnimationFrame(() => {
+          handleChatUpdate._raf = null;
+          patchLastAssistantBubble(a);
+        });
+      }
+      return;
+    }
+
+    // Obca sesja Build — zero zapisu do bieżącego allMessages/DOM
+    if (!isViewingSession(sid)) {
       applyStreamOffscreen(sid, params);
       return;
     }
@@ -1691,6 +1967,8 @@
     if (target !== mode) return; // nie ruszaj UI drugiego trybu
 
     busy = Boolean(b);
+    if (busy) startTurnTimer();
+    else stopTurnTimer();
     const viewingBusySession =
       mode === "home"
         ? busy
@@ -1709,13 +1987,24 @@
       : "Send";
     el.btnSend.classList.toggle("queue-mode", busy);
     el.btnStop.classList.toggle("hidden", !busy);
-    // Chip Working tylko na sesji, która realnie pracuje
-    el.busyChip.classList.toggle("hidden", !viewingBusySession);
+    // Chip „Working” obok Auto — NIGDY; status = pasek Myślę… nad composerem
+    if (el.busyChip) {
+      el.busyChip.classList.add("hidden");
+      el.busyChip.setAttribute("hidden", "");
+    }
     el.input.disabled = false;
     el.input.readOnly = false;
     if (busy && viewingBusySession) {
       el.input.placeholder =
         "Pisz dalej — Enter doda do kolejki…";
+      // trzymaj „Myślę…” widoczne przez całą pracę, nawet bez nowego setStatus
+      if (el.statusBar.classList.contains("hidden")) {
+        const d = bag().statusDetail;
+        const p = bag().statusPhase;
+        lastStatusLabel = d || (p === "tool" ? "Pracuję…" : "Myślę…");
+        paintStatusText();
+        el.statusBar.classList.remove("hidden");
+      }
     } else if (busy && !viewingBusySession) {
       el.input.placeholder =
         "Agent pracuje w innej sesji Build…";
@@ -1801,11 +2090,17 @@
     );
     t = t.replace(/^[^\n]*grok-sessions\/attachments\/[^\n]*$/gim, "");
     t = t.replace(
-      /"\/Users\/[^"]*\/grok-sessions\/attachments\/[^"]+"/g,
+      /"[^"]*[\/\\]attachments[\/\\][^"]+"/g,
       ""
     );
     // image\t"/path" lines from new format if marker missing
     t = t.replace(/^(image|file|folder)\t.+$/gim, "");
+
+    // Agent-only inject note (↩ Wyślij teraz) — never show in chat bubble
+    t = t.replace(
+      /\n*\s*\[Wstrzyknieto w trakcie pracy[^\]]*\]\s*/gi,
+      "\n"
+    );
 
     return t.replace(/\n{3,}/g, "\n\n").trim();
   }
@@ -1829,21 +2124,22 @@
       t = t.replace(/Execute\s+[^\n]*(?:\n(?!\n)[^\n]*)*/gi, "");
     } while (t !== prev);
 
-    // Linie będące samym dumpem komendy / ścieżki edycji
+    // Linie będące samym dumpem komendy / ścieżki edycji.
+    // Wymagamy backticka albo ścieżki — inaczej ginęły normalne zdania
+    // zaczynające się od „Read…”, „Write…”, „Search…”.
     t = t.replace(
-      /^(edit|read|write|bash|search|grep|Execute)\s+`?[\/\w].*$/gim,
+      /^(edit|read|write|bash|search|grep|Execute)\s+(`[^\n]*|[~/][^\s]*)\s*$/gim,
       ""
     );
-    t = t.replace(/^\/Users\/sosky\/[^\n]{10,}$/gim, "");
+    // linia będąca samą ścieżką absolutną (dowolny użytkownik / system)
+    t = t.replace(/^(?:\/Users\/|\/home\/|[A-Za-z]:\\)[^\n]{10,}$/gim, "");
     // heredoc / python one-liners z tool echo
     t = t.replace(/^(python3?|node|bash|zsh|sh)\s+<<['`]?\w+['`]?[\s\S]*$/gim, "");
 
-    // Długie bloki kodu fenced — w Code nie w bańce czatu (to echo tooli)
-    if (mode === "grok") {
-      t = t.replace(/```[\s\S]*?```/g, "");
-      // niekompletny fence na końcu streamu
-      t = t.replace(/```[\s\S]*$/g, "");
-    }
+    // NIE kasujemy już bloków ``` w trybie Build. Wcześniej ta jedna linia
+    // wycinała KAŻDY blok kodu z odpowiedzi agenta kodującego — echo narzędzi
+    // łapią osobne reguły (isToolEchoText / „Execute …”), a prawdziwy kod ma
+    // się pokazać, jako zwijalny blok w markdownie.
 
     // resztki po sklejeniu
     t = t.replace(/\n{3,}/g, "\n\n").trim();
@@ -1905,7 +2201,7 @@
   function applyTheme(theme) {
     const t = ["dark", "light", "auto"].includes(theme) ? theme : "dark";
     document.documentElement.setAttribute("data-theme", t);
-    api.setSettings({ theme: t }).catch(() => {});
+    // bez zapisu: to tylko odtworzenie zapisanego ustawienia przy starcie
   }
 
   async function addAttachmentFromFile(file) {
@@ -1921,7 +2217,7 @@
       kind: (file.type || "").startsWith("image/") ? "image" : "file",
     });
     if (!res.ok) {
-      showToast(res.error || "Attach failed", "error");
+      showToast(res.error || "Nie udało się dodać pliku", "error");
       return;
     }
     attachments.push(res);
@@ -1931,7 +2227,7 @@
   async function addAttachmentFromPath(p) {
     const res = await api.importAttachmentPath(p);
     if (!res.ok) {
-      showToast(res.error || "Import failed", "error");
+      showToast(res.error || "Nie udało się zaimportować", "error");
       return;
     }
     attachments.push(res);
@@ -1999,26 +2295,22 @@
   /**
    * ↩ na bańce w kolejce: przerwij bieżącą robotę i wyślij to TERAZ
    * (włączone w kontekst agenta — nie czekaj na „Gotowe”).
+   *
+   * Ważne: NIE czyść _queued przed runSendTurn i NIE doklejaj drugiej bańki.
+   * Dopisek „Wstrzyknieto…” idzie tylko do API, nie do UI.
    */
   async function injectQueuedNow(msg) {
     const text = cleanUserText(msg?.text || "");
     const atts = (msg && msg.attachments) || [];
     if (!text && !atts.length) return;
 
-    // zdejmij z kolejki (całość scaloną albo tę jedną)
-    if (messageQueue.length) {
-      // jeśli to scalona bańka — opróżnij całą kolejkę (treść jest w msg)
-      messageQueue = [];
-    }
-    // odznacz bańki „w kolejce”
-    for (const m of allMessages) {
-      if (m._queued) m._queued = false;
-    }
+    // zdejmij z kolejki (treść jest w bańce / msg)
+    messageQueue = [];
     updateQueueChip();
 
     // stop bieżącej tury
     try {
-      await api.chatStop();
+      await api.chatStop({ mode });
     } catch {
       /* ignore */
     }
@@ -2027,12 +2319,13 @@
     if (streamingAssistant) streamingAssistant._streaming = false;
     streamingAssistant = null;
 
-    // prześlij jako nową turę z dopiskiem „kontynuuj bieżące”
+    // Zostaw _queued na bańce — runSendTurn ma ją ZREUSE'ować, nie sklonować.
+    // Dopisek tylko w payloadzie do agenta.
     const payload =
       (text || "(załącznik)") +
       "\n\n[Wstrzyknieto w trakcie pracy — włącz to w bieżące zadanie, nie zaczynaj od zera.]";
 
-    // odśwież UI bańki (bez badge kolejki)
+    // zdejmij badge „w kolejce” z DOM (tekst bańki bez zmian)
     const rows = el.messages.querySelectorAll(".msg.user");
     const lastUser = rows[rows.length - 1];
     if (lastUser) {
@@ -2041,23 +2334,67 @@
     }
 
     showToast("Wysyłam teraz (przerwano bieżącą turę)", "ok");
-    await runSendTurn(payload, atts, false);
+    await runSendTurn(payload, atts, false, { reuseQueuedBubble: true });
   }
 
-  async function runSendTurn(text, atts, clearInput) {
+  /**
+   * @param {string} text — payload do API (może mieć marker wstrzyknięcia)
+   * @param {object[]} atts
+   * @param {boolean} clearInput
+   * @param {{ reuseQueuedBubble?: boolean }} opts
+   */
+  async function runSendTurn(text, atts, clearInput, opts = {}) {
     const cwd = selectedRow()?.cwd || defaultCwd;
     const sessionId = liveSessionId || selectedId || null;
+    const displayText = cleanUserText(text); // bez markerów / „Wstrzyknieto…”
 
-    // Jeśli to nie z kolejki, dodaj bubble user (kolejka już dodała)
-    const last = lastAll();
-    const alreadyShown =
-      last &&
-      last.role === "user" &&
-      last._queued &&
-      cleanUserText(last.text) === cleanUserText(text);
+    // Znajdź bańkę z kolejki do reuse (nie klonuj po wysłaniu)
+    let queuedBubble = null;
+    // 1) jawna flaga _queued (preferuj najnowszą)
+    for (let i = allMessages.length - 1; i >= 0; i--) {
+      if (allMessages[i].role === "user" && allMessages[i]._queued) {
+        queuedBubble = allMessages[i];
+        break;
+      }
+    }
+    // 2) inject: ta sama lokalna bańka usera o tym tekście (gdy flaga już spadła)
+    if (!queuedBubble && opts.reuseQueuedBubble && displayText) {
+      const want = normUserText(displayText);
+      for (let i = allMessages.length - 1; i >= 0; i--) {
+        const m = allMessages[i];
+        if (m.role !== "user" || !m._local) continue;
+        const got = normUserText(m.text);
+        if (
+          got &&
+          (got === want || want.startsWith(got) || got.startsWith(want))
+        ) {
+          queuedBubble = m;
+          break;
+        }
+        break; // tylko ostatni lokalny user
+      }
+    }
+
     const toAppend = [];
-    if (!alreadyShown) {
-      const showText = text && text !== "(załącznik)" ? text : "";
+    if (queuedBubble) {
+      // ta sama bańka — tylko zdejmij „w kolejce”, tekst UI = treść usera
+      queuedBubble._queued = false;
+      queuedBubble._local = true;
+      if (displayText) queuedBubble.text = displayText;
+      if (atts && atts.length) queuedBubble.attachments = atts;
+      // DOM: zdejmij badge bez przebudowy całej bańki
+      const rows = el.messages.querySelectorAll(".msg.user");
+      const lastUser = rows[rows.length - 1];
+      if (lastUser) {
+        lastUser.querySelector(".queued-actions")?.remove();
+        lastUser.querySelector(".queued-badge")?.remove();
+        const content = lastUser.querySelector(".msg-content");
+        if (content && displayText) content.textContent = displayText;
+      }
+    } else {
+      // świeża wiadomość (nie z kolejki)
+      const showText =
+        displayText && displayText !== "(załącznik)" ? displayText : "";
       if (showText || (atts && atts.length)) {
         const userMsg = {
           id: `u-local-${Date.now()}`,
@@ -2071,8 +2408,6 @@
         pushAll(userMsg);
         toAppend.push(userMsg);
       }
-    } else if (last) {
-      last._queued = false;
     }
 
     streamingAssistant = {
@@ -2091,11 +2426,18 @@
     attachments = [];
     renderAttachChips();
     autosize();
-    // Enter = doklej bańki + idź na dół TYLKO bo user właśnie wysłał
+    // Enter: NIE wipe'uj DOM (replaceChildren = scrollTop→0 = skok w górę).
+    // Tylko doklej nowe bańki na koniec + force scroll na dół.
     stickToBottom = true;
-    if (toAppend.length) appendMessageRows(toAppend, { stick: true });
-    else scrollChatToBottom(true);
-    dedupeTrailingUserMessages();
+    visibleCount = Math.max(visibleCount, allMessages.length, PAGE);
+    syncVisibleMessages();
+    if (toAppend.length) {
+      appendMessageRows(toAppend, { stick: true });
+    } else {
+      // reuse kolejki — bańka już w DOM; i tak dociągnij dół
+      scrollChatToBottom(true);
+    }
+    scrollChatToBottom(true);
     renderActivity();
     setBusy(true);
     if (mode === "grok" && sessionId) {
@@ -2142,7 +2484,7 @@
     }
     setBusy(false);
     if (!res.ok) {
-      showToast(res.error || "Send failed", "error");
+      showToast(res.error || "Nie udało się wysłać", "error");
       setStatus("error", res.error || "Błąd");
       el.input.focus();
       // nadal spróbuj kolejkę
@@ -2187,8 +2529,14 @@
     pushBag();
     persistNav();
     await refresh();
-    el.input.focus();
-    if (typeof refreshUsage === "function") refreshUsage({ includeRate: false });
+    // refresh() tylko listę — nie ładuje transcriptu (nie wipe'uje czatu)
+    if (stickToBottom) scrollChatToBottom(true);
+    try {
+      el.input.focus({ preventScroll: true });
+    } catch {
+      el.input.focus();
+    }
+    if (typeof refreshUsage === "function") refreshUsage();
     await drainQueue();
   }
 
@@ -2313,6 +2661,7 @@
     renderAttachChips();
     el.wsTitle.textContent = "New chat";
     updatePathChips(mode === "home" ? "" : defaultCwd);
+    pinMessagesBottom(false);
     renderMessages({ forceScroll: true });
     renderList();
     renderActivity();
@@ -2376,18 +2725,18 @@
     }
     if (act === "unread") {
       await markSessionFlag(id, { unread: true });
-      showToast("Unread", "ok");
+      showToast("Oznaczone jako nieprzeczytane", "ok");
       return;
     }
     if (act === "read") {
       await markSessionFlag(id, { unread: false });
-      showToast("Read", "ok");
+      showToast("Oznaczone jako przeczytane", "ok");
       return;
     }
     if (act === "pin") {
       const cur = sessionFlagMap[id] || {};
       await markSessionFlag(id, { pinned: !cur.pinned });
-      showToast(cur.pinned ? "Unpinned" : "Pinned", "ok");
+      showToast(cur.pinned ? "Odpięte" : "Przypięte", "ok");
       return;
     }
     if (act === "reveal") {
@@ -2436,7 +2785,7 @@
         title: String(name).trim(),
         mode,
       });
-      if (!res.ok) showToast(res.error || "Rename failed", "error");
+      if (!res.ok) showToast(res.error || "Nie udało się zmienić nazwy", "error");
       else {
         if (selectedId === id) el.wsTitle.textContent = String(name).trim();
         await refresh();
@@ -2474,7 +2823,7 @@
   document.getElementById("effort-select")?.addEventListener("change", async (e) => {
     effortLevel = e.target.value || "high";
     const res = await api.chatSetEffort(effortLevel);
-    if (!res.ok) showToast(res.error || "Effort failed", "error");
+    if (!res.ok) showToast(res.error || "Nie udało się zmienić effort", "error");
     else showToast(`Effort: ${effortLevel}`, "ok");
   });
   el.form.onsubmit = (e) => {
@@ -2493,17 +2842,18 @@
     renderList();
   });
   el.btnStop.onclick = async () => {
-    const res = await api.chatStop();
+    // przekaż tryb — w Home trzeba przerwać żądanie HTTP, nie proces agenta
+    const res = await api.chatStop({ mode });
     setBusy(false);
-    if (!res.ok) showToast(res.error || "Stop failed", "error");
-    else showToast("Stopped", "ok");
+    if (!res.ok) showToast(res.error || "Nie udało się zatrzymać", "error");
+    else showToast("Zatrzymane", "ok");
   };
   el.modelSelect.addEventListener("change", async () => {
     const id = el.modelSelect.value;
     if (mode === "home") homeModelId = id;
     else codeModelId = id;
     const res = await api.chatSetModel({ modelId: id, mode });
-    if (!res.ok) showToast(res.error || "Model change failed", "error");
+    if (!res.ok) showToast(res.error || "Nie udało się zmienić modelu", "error");
   });
   el.btnToggleActivity.onclick = () => {
     showActivity = !showActivity;
@@ -2599,27 +2949,60 @@
     document.getElementById("set-grok-path").value = s.grokPath || "";
     document.getElementById("set-cwd").value = s.defaultCwd || "";
     document.getElementById("set-subagents").checked = Boolean(s.showSubagents);
+    document.getElementById("set-theme").value = s.theme || "dark";
+    document.getElementById("set-permission").value = s.permissionMode || "auto";
+    document.getElementById("set-max-tokens").value = s.homeMaxTokens || 8192;
+    document.getElementById("set-cookies").checked = Boolean(s.readBrowserCookies);
+    document.getElementById("set-python").value = s.pythonPath || "";
     el.settingsModal.classList.remove("hidden");
   };
   document.getElementById("set-cancel").onclick = () =>
     el.settingsModal.classList.add("hidden");
+
+  // Ścieżka do Pythona ma sens tylko przy włączonym czytaniu ciasteczek
+  const cookiesBox = document.getElementById("set-cookies");
+  const pythonField = document.getElementById("python-field");
+  const syncPythonField = () => {
+    if (pythonField && cookiesBox) {
+      pythonField.classList.toggle("disabled", !cookiesBox.checked);
+    }
+  };
+  if (cookiesBox) {
+    cookiesBox.addEventListener("change", syncPythonField);
+    syncPythonField();
+  }
+
+  // Podgląd motywu od razu, bez czekania na Zapisz
+  document.getElementById("set-theme")?.addEventListener("change", (e) => {
+    document.documentElement.setAttribute("data-theme", e.target.value);
+  });
   document.getElementById("set-pick-grok").onclick = async () => {
     const p = await api.pickGrokBinary();
     if (p) document.getElementById("set-grok-path").value = p;
   };
   document.getElementById("set-login").onclick = async () => {
     const res = await api.login();
-    if (!res.ok) showToast(res.error || "login fail", "error");
-    else showToast("Login opened in Terminal", "ok");
+    if (!res.ok) showToast(res.error || "Logowanie nie wystartowało", "error");
+    else showToast("Logowanie otwarte w Terminalu", "ok");
   };
   document.getElementById("set-save").onclick = async () => {
+    const theme = document.getElementById("set-theme").value;
+    const permissionMode = document.getElementById("set-permission").value;
     await api.setSettings({
       grokPath: document.getElementById("set-grok-path").value.trim(),
       defaultCwd: document.getElementById("set-cwd").value.trim(),
       showSubagents: document.getElementById("set-subagents").checked,
+      theme,
+      permissionMode,
+      homeMaxTokens: Number(document.getElementById("set-max-tokens").value) || 8192,
+      readBrowserCookies: document.getElementById("set-cookies").checked,
+      pythonPath: document.getElementById("set-python").value.trim(),
     });
+    document.documentElement.setAttribute("data-theme", theme);
+    permMode = permissionMode;
+    paintPermChip();
     el.settingsModal.classList.add("hidden");
-    showToast("Saved", "ok");
+    showToast("Zapisane", "ok");
     await refresh();
   };
 
@@ -2632,8 +3015,8 @@
     el.accountModal.classList.add("hidden");
   document.getElementById("account-login").onclick = async () => {
     const res = await api.login();
-    if (!res.ok) showToast(res.error || "login fail", "error");
-    else showToast("Login opened", "ok");
+    if (!res.ok) showToast(res.error || "Logowanie nie wystartowało", "error");
+    else showToast("Logowanie otwarte", "ok");
   };
 
   window.addEventListener("keydown", (e) => {
@@ -2645,7 +3028,14 @@
 
   api.onUpdated(applyPayload);
   api.onChatUpdate(handleChatUpdate);
-  api.onChatBusy(({ busy: b, sessionId }) => {
+  api.onChatBusy(({ busy: b, sessionId, mode: evMode }) => {
+    // Home i Build mają teraz osobne tory — zdarzenie z jednego nie może
+    // przestawiać stanu drugiego.
+    if (evMode === "home") {
+      bags.home.busy = Boolean(b);
+      if (mode === "home") setBusy(Boolean(b), "home");
+      return;
+    }
     if (b) {
       busySessionId =
         sessionId || busySessionId || null;
@@ -2747,6 +3137,8 @@
       const es = document.getElementById("effort-select");
       if (es) es.value = effortLevel;
     }
+    permMode = data.settings?.permissionMode || "auto";
+    paintPermChip();
     if (typeof api.getSessionFlags === "function") {
       try {
         const fr = await api.getSessionFlags();
@@ -2790,11 +3182,6 @@
     ctxMeta: document.getElementById("usage-ctx-meta"),
     ctxBar: document.getElementById("usage-ctx-bar"),
     ctxTokens: document.getElementById("usage-ctx-tokens"),
-    rateMeta: document.getElementById("usage-rate-meta"),
-    rateBar: document.getElementById("usage-rate-bar"),
-    reqMeta: document.getElementById("usage-req-meta"),
-    termMeta: document.getElementById("usage-term-meta"),
-    sessionMeta: document.getElementById("usage-session-meta"),
     account: document.getElementById("usage-account"),
   };
   let usageTimer = null;
@@ -2813,17 +3200,14 @@
     el.classList.toggle("hot", p >= 90);
   }
 
-  async function refreshUsage(opts = {}) {
+  async function refreshUsage() {
     if (!usageEls.btn || typeof api.getUsage !== "function") return;
     const sid =
       mode === "grok"
         ? liveSessionId || selectedId || null
         : null;
     try {
-      const u = await api.getUsage({
-        sessionId: sid,
-        includeRate: opts.includeRate !== false,
-      });
+      const u = await api.getUsage({ sessionId: sid });
       if (!u || !u.ok) {
         usageEls.pct.textContent = "—";
         return;
@@ -2847,7 +3231,19 @@
           const reset = weekly.resetsAt
             ? `Reset: ${new Date(weekly.resetsAt).toLocaleString("pl-PL")}`
             : "";
-          usageEls.weeklyDetail.textContent = [weekly.label || "Grok Build", reset]
+          const products = Array.isArray(weekly.products)
+            ? weekly.products
+                .filter((p) => p && p.percent > 0)
+                .map((p) => `${p.label} ${Math.round(p.percent)}%`)
+                .join(" · ")
+            : "";
+          usageEls.weeklyDetail.textContent = [
+            weekly.label || "Grok Build",
+            products && products !== (weekly.label || "Grok Build") + ` ${Math.round(weekly.percent)}%`
+              ? products
+              : "",
+            reset,
+          ]
             .filter(Boolean)
             .join(" · ");
         }
@@ -2859,7 +3255,7 @@
         if (usageEls.weeklyDetail) {
           usageEls.weeklyDetail.textContent =
             plan?.weeklyError ||
-            "Pełne % tygodniowe tylko w grok.com (xAI blokuje token Build)";
+            "Zaloguj się w Arc/Chrome na grok.com — stamtąd bierzemy % tygodniowy";
         }
       }
 
@@ -2883,47 +3279,20 @@
       }
       const used = u.context?.tokensUsed;
       const total = u.context?.tokensTotal;
-      usageEls.ctxTokens.textContent =
-        used != null && total != null
-          ? `${fmtTokens(used)} / ${fmtTokens(total)} · tury ${u.context?.turns ?? "—"} · tool ${u.context?.tools ?? "—"}`
-          : mode === "home"
-            ? "Home nie zapisuje context window jak Build"
-            : "Brak signals.json — otwórz sesję Build";
-
-      if (u.rate && u.rate.tokensLimit != null) {
-        const rem = u.rate.tokensRemaining;
-        const lim = u.rate.tokensLimit;
-        const usedPct =
-          lim > 0 && rem != null
-            ? Math.round(((lim - rem) / lim) * 100)
-            : 0;
-        usageEls.rateMeta.textContent =
-          rem != null ? `${fmtTokens(rem)} left` : "—";
-        setBar(usageEls.rateBar, usedPct);
-        usageEls.reqMeta.textContent =
-          u.rate.requestsRemaining != null && u.rate.requestsLimit != null
-            ? `Requesty: ${u.rate.requestsRemaining} / ${u.rate.requestsLimit}`
-            : "—";
-      } else {
-        usageEls.rateMeta.textContent = "n/d";
-        setBar(usageEls.rateBar, 0);
-        usageEls.reqMeta.textContent = "Rate limit: brak odczytu";
+      if (usageEls.ctxTokens) {
+        usageEls.ctxTokens.textContent =
+          used != null && total != null
+            ? `${fmtTokens(used)} / ${fmtTokens(total)} · tury ${u.context?.turns ?? "—"} · tool ${u.context?.tools ?? "—"}`
+            : mode === "home"
+              ? "Home nie zapisuje context window jak Build"
+              : "Brak signals.json — otwórz sesję Build";
       }
-
-      if (u.terminal?.isActive) {
-        usageEls.termMeta.textContent = `aktywny · pid ${u.terminal.pid || "?"}`;
-        usageEls.termMeta.style.color = "#4ade80";
-      } else {
-        usageEls.termMeta.textContent = "nie w terminalu";
-        usageEls.termMeta.style.color = "";
-      }
-      usageEls.sessionMeta.textContent = sid
-        ? `sesja ${String(sid).slice(0, 8)}… · ${u.context?.model || "—"}`
-        : "brak sesji Build";
       const planBit = plan?.tierLabel ? ` · ${plan.tierLabel}` : "";
-      usageEls.account.textContent = u.account?.email
-        ? `${u.account.name || ""} · ${u.account.email}${planBit}`.trim()
-        : `konto: —${planBit}`;
+      if (usageEls.account) {
+        usageEls.account.textContent = u.account?.email
+          ? `${u.account.name || ""} · ${u.account.email}${planBit}`.trim()
+          : `konto: —${planBit}`;
+      }
     } catch (err) {
       usageEls.pct.textContent = "!";
     }
@@ -2934,7 +3303,7 @@
       e.stopPropagation();
       usageOpen = !usageOpen;
       usageEls.pop.classList.toggle("hidden", !usageOpen);
-      if (usageOpen) await refreshUsage({ includeRate: true });
+      if (usageOpen) await refreshUsage();
     });
     document.addEventListener("click", (e) => {
       if (!usageOpen) return;
@@ -2944,20 +3313,145 @@
         usageEls.pop.classList.add("hidden");
       }
     });
-    usageTimer = setInterval(() => refreshUsage({ includeRate: false }), 15000);
-    refreshUsage({ includeRate: true });
+    // Co 60 s i tylko przy widocznym oknie: dane po stronie serwera i tak
+    // są cache'owane, a odpytywanie co 15 s w tle było czystym marnotrawstwem.
+    usageTimer = setInterval(() => {
+      if (document.visibilityState === "visible") refreshUsage();
+    }, 60000);
+    refreshUsage();
   }
 
-  // Auto (permission mode) — jak w Claude, lewy dół
+  /* ===== Tryb uprawnień: Auto / Pytaj (jak w Claude Code) ===== */
   const permBtn = document.getElementById("perm-mode-btn");
+
+  function paintPermChip() {
+    if (!permBtn) return;
+    const ask = permMode === "ask";
+    permBtn.textContent = ask ? "Pytaj" : "Auto";
+    permBtn.classList.toggle("mode-ask", ask);
+    permBtn.classList.toggle("mode-auto", !ask);
+    permBtn.title = ask
+      ? "Agent pyta o zgodę na każde narzędzie. Kliknij, żeby przełączyć na Auto."
+      : "Agent używa narzędzi bez pytania. Kliknij, żeby przełączyć na Pytaj.";
+  }
+
   if (permBtn) {
-    permBtn.onclick = () => {
+    permBtn.onclick = async () => {
+      permMode = permMode === "ask" ? "auto" : "ask";
+      paintPermChip();
+      const res = await api.setSettings({ permissionMode: permMode });
+      if (res && res.permissionMode) {
+        permMode = res.permissionMode;
+        paintPermChip();
+      }
       showToast(
-        "Auto = narzędzia bez pytania (always-approve). Effort: Low/Med/High/xHigh po prawej.",
+        permMode === "ask"
+          ? "Pytaj: agent poprosi o zgodę na każde narzędzie"
+          : "Auto: agent działa bez pytania",
         "ok"
       );
     };
   }
+
+  /* ===== Modal zgody na narzędzie ===== */
+  const permModal = document.getElementById("perm-modal");
+  const permQueue = [];
+  let permShowing = false;
+
+  function toolLabel(toolCall) {
+    if (!toolCall) return "Narzędzie";
+    return (
+      toolCall.title ||
+      toolCall.kind ||
+      toolCall.name ||
+      toolCall.toolName ||
+      "Narzędzie"
+    );
+  }
+
+  function toolDetail(toolCall) {
+    if (!toolCall) return "";
+    const bits = [];
+    if (Array.isArray(toolCall.locations)) {
+      bits.push(toolCall.locations.map((l) => l.path || "").filter(Boolean).join("\n"));
+    }
+    const raw = toolCall.rawInput ?? toolCall.input;
+    if (raw != null) {
+      try {
+        bits.push(typeof raw === "string" ? raw : JSON.stringify(raw, null, 2));
+      } catch {
+        /* pomiń */
+      }
+    }
+    return bits.filter(Boolean).join("\n\n").slice(0, 2000);
+  }
+
+  function showNextPermission() {
+    if (permShowing || !permQueue.length || !permModal) return;
+    const req = permQueue.shift();
+    permShowing = true;
+
+    document.getElementById("perm-tool").textContent = toolLabel(req.toolCall);
+    const detailEl = document.getElementById("perm-detail");
+    const detail = toolDetail(req.toolCall);
+    detailEl.textContent = detail;
+    detailEl.classList.toggle("hidden", !detail);
+
+    const actions = document.getElementById("perm-actions");
+    actions.innerHTML = "";
+    const answer = async (optionId) => {
+      permModal.classList.add("hidden");
+      permShowing = false;
+      await api.permissionReply({ id: req.id, optionId });
+      showNextPermission();
+    };
+
+    const options = Array.isArray(req.options) ? req.options : [];
+    if (options.length) {
+      for (const o of options) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className =
+          "btn" + (/allow|approve/i.test(o.kind || o.optionId || "") ? " primary" : "");
+        b.textContent = o.name || o.optionId;
+        b.onclick = () => answer(o.optionId);
+        actions.appendChild(b);
+      }
+    }
+    const deny = document.createElement("button");
+    deny.type = "button";
+    deny.className = "btn";
+    deny.textContent = "Odmów";
+    deny.onclick = () => answer(null);
+    actions.appendChild(deny);
+
+    permModal.classList.remove("hidden");
+  }
+
+  if (typeof api.onChatPermission === "function") {
+    api.onChatPermission((req) => {
+      permQueue.push(req || {});
+      showNextPermission();
+    });
+  }
+
+  /* ===== Copy przy blokach kodu ===== */
+  el.messages.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".md-copy");
+    if (!btn) return;
+    const code = btn.closest(".md-code-wrap")?.querySelector("code");
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code.textContent || "");
+      const prev = btn.textContent;
+      btn.textContent = "Skopiowane";
+      setTimeout(() => {
+        btn.textContent = prev;
+      }, 1200);
+    } catch {
+      showToast("Nie udało się skopiować", "error");
+    }
+  });
 
   bindChatScrollWatcher();
 
