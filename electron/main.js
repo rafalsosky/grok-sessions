@@ -34,7 +34,15 @@ let watchers = [];
 let pollTimer = null;
 /** @type {AcpClient|null} */
 let acp = null;
-let promptBusy = false;
+/**
+ * Osobne flagi: Home to HTTP do api.x.ai, Build to proces agenta.
+ * Wcześniej jedna wspólna flaga blokowała Home na czas pracy agenta.
+ */
+const promptBusy = { home: false, grok: false };
+/** Przerwanie żądania Home (Stop działa też poza trybem Build). */
+let homeAbort = null;
+/** Oczekujące prośby agenta o zgodę na narzędzie: id → sessionId */
+const pendingPermissions = new Map();
 
 function userDataDir() {
   return app.getPath("userData");
@@ -50,8 +58,43 @@ function send(channel, payload) {
   }
 }
 
+function appIconPaths() {
+  const base = path.join(__dirname, "..", "assets");
+  return {
+    // PNG is reliable for dock.setIcon on macOS; icns for window / packaging
+    png: path.join(base, "supergrok-dock.png"),
+    icns: path.join(base, "GrokSessions.icns"),
+  };
+}
+
+function applyDockIcon() {
+  if (process.platform !== "darwin" || !app.dock) return;
+  const { png, icns } = appIconPaths();
+  const pick = fs.existsSync(png) ? png : fs.existsSync(icns) ? icns : null;
+  if (!pick) return;
+  try {
+    const img = nativeImage.createFromPath(pick);
+    if (!img.isEmpty()) app.dock.setIcon(img);
+  } catch (err) {
+    console.warn("dock icon:", err.message);
+  }
+}
+
+/** Otwórz w przeglądarce, ale tylko http/https (nigdy file:, smb:, itd.). */
+function openExternalSafe(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl));
+    if (u.protocol === "http:" || u.protocol === "https:") {
+      shell.openExternal(u.toString());
+    }
+  } catch {
+    /* nie URL — ignoruj */
+  }
+}
+
 function createWindow() {
-  const iconPath = path.join(__dirname, "..", "assets", "GrokSessions.icns");
+  const { icns, png } = appIconPaths();
+  const iconPath = fs.existsSync(icns) ? icns : png;
   const winOpts = {
     width: 1280,
     height: 820,
@@ -69,12 +112,34 @@ function createWindow() {
       spellcheck: true,
     },
   };
-  if (fs.existsSync(iconPath)) {
+  if (iconPath && fs.existsSync(iconPath)) {
     winOpts.icon = iconPath;
   }
   mainWindow = new BrowserWindow(winOpts);
 
   mainWindow.loadFile(path.join(__dirname, "..", "src", "index.html"));
+
+  // BEZPIECZEŃSTWO: bez tego link z odpowiedzi modelu (target="_blank")
+  // otwierał obcą stronę WEWNĄTRZ aplikacji, w oknie dziedziczącym
+  // ustawienia rodzica. Linki idą do przeglądarki systemowej, i tylko http(s).
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalSafe(url);
+    return { action: "deny" };
+  });
+
+  // Nawigacja poza własny plik = zawsze do przeglądarki, nigdy w oknie apki.
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (url !== mainWindow.webContents.getURL()) {
+      event.preventDefault();
+      openExternalSafe(url);
+    }
+  });
+
+  // Żadnych <webview> — nie używamy ich, a to kolejny wektor.
+  mainWindow.webContents.on("will-attach-webview", (event) => {
+    event.preventDefault();
+  });
+
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -145,17 +210,43 @@ function buildListPayload() {
       lastMode: settings.lastMode || "home",
       lastHomeSessionId: settings.lastHomeSessionId || "",
       lastCodeSessionId: settings.lastCodeSessionId || "",
+      theme: settings.theme || "dark",
+      effort: settings.effort || "high",
+      permissionMode: settings.permissionMode || "auto",
+      readBrowserCookies: Boolean(settings.readBrowserCookies),
+      pythonPath: settings.pythonPath || "",
+      homeMaxTokens: settings.homeMaxTokens || 8192,
     },
     agentReady: Boolean(acp && acp.ready),
-    promptBusy,
+    promptBusy: promptBusy.grok,
+    homeBusy: promptBusy.home,
     /** Tylko ta sesja Build ma „pracuje” — nie cała lista */
     activeSessionId: acp ? acp.sessionId : null,
-    busySessionId: promptBusy && acp && acp.sessionId ? acp.sessionId : null,
+    busySessionId: promptBusy.grok && acp && acp.sessionId ? acp.sessionId : null,
   };
 }
 
-function pushSessions() {
-  send("sessions:updated", buildListPayload());
+let lastListSignature = "";
+
+/**
+ * Wysyłaj listę tylko gdy naprawdę się zmieniła. Wcześniej co tick pollingu
+ * (co 3 s) renderer przebudowywał całą listę sesji w DOM bez powodu.
+ */
+function pushSessions(force = false) {
+  const payload = buildListPayload();
+  const sig = JSON.stringify([
+    payload.rows.map((r) => [r.id, r.title, r.lastActiveAt, r.isActive, r.numMessages]),
+    payload.homeRows.map((r) => [r.id, r.title, r.updatedAt, r.numMessages]),
+    payload.busySessionId,
+    payload.promptBusy,
+    payload.homeBusy,
+    payload.authOk,
+    payload.agentReady,
+    payload.error,
+  ]);
+  if (!force && sig === lastListSignature) return;
+  lastListSignature = sig;
+  send("sessions:updated", payload);
 }
 
 function clearWatchers() {
@@ -199,8 +290,13 @@ function startWatchers() {
   tryWatch(activeFile);
   tryWatch(homeChats.homeDir(userDataDir()));
 
-  const pollMs = Math.max(3000, Number(settings.pollMs) || 5000);
-  pollTimer = setInterval(pushSessions, pollMs);
+  // fs.watch łapie zmiany od razu; polling to tylko siatka bezpieczeństwa,
+  // więc może być rzadki. Pomijamy tick, gdy okno jest schowane.
+  const pollMs = Math.max(5000, Number(settings.pollMs) || 10000);
+  pollTimer = setInterval(() => {
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) return;
+    pushSessions();
+  }, pollMs);
 }
 
 async function ensureAcp() {
@@ -212,8 +308,19 @@ async function ensureAcp() {
     acp = new AcpClient({
       grokPath: settings.grokPath,
       model: settings.modelId || "grok-4.5",
-      alwaysApprove: true,
+      // "ask" = agent pyta o narzędzia; wcześniej było zawsze true
+      alwaysApprove: settings.permissionMode !== "ask",
       reasoningEffort: settings.effort || "high",
+    });
+    acp.on("permission", ({ id, params }) => {
+      const sid = (params && (params.sessionId || params.session_id)) || null;
+      pendingPermissions.set(id, sid);
+      send("chat:permission", {
+        id,
+        sessionId: sid,
+        toolCall: (params && params.toolCall) || null,
+        options: (params && params.options) || [],
+      });
     });
     acp.on("update", (params) => {
       // Zawsze taguj sesją ACP — UI nie może pisać do „aktualnie otwartej”
@@ -261,6 +368,8 @@ async function sendHomeChat({
   const settings = getSettings();
   const token = xai.getAccessToken(settings.grokHome || resolveGrokHome());
   if (!token) throw new Error("Brak tokenu xAI — zaloguj się (grok login)");
+  homeAbort = new AbortController();
+  const signal = homeAbort.signal;
 
   let chat = sessionId ? homeChats.loadHomeChat(userDataDir(), sessionId) : null;
   if (!chat) chat = homeChats.createHomeChat(userDataDir());
@@ -297,6 +406,7 @@ async function sendHomeChat({
     const vid = await xai.generateVideo(token, {
       prompt,
       aspect_ratio: aspectRatio || "16:9",
+      signal,
     });
     let assistantMsg;
     if (vid.kind === "storyboard" || vid.b64) {
@@ -342,6 +452,7 @@ async function sendHomeChat({
       prompt,
       model: "grok-imagine-image",
       aspect_ratio: aspectRatio || "1:1",
+      signal,
     });
     const saved = saveBase64(userDataDir(), {
       name: "generated.png",
@@ -375,19 +486,32 @@ async function sendHomeChat({
   status("thinking", "Myślę…");
   const model = modelId || settings.homeModelId || "grok-4.5";
 
-  // Build OpenAI-style messages from history
+  // Build OpenAI-style messages from history.
+  // Obrazy jako base64 dołączamy TYLKO do ostatniej wiadomości użytkownika.
+  // Wcześniej każdy obraz z całego czatu leciał w każdym kolejnym żądaniu,
+  // więc koszt i czas rosły z każdą turą.
+  const lastUserIdx = (() => {
+    for (let i = chat.messages.length - 1; i >= 0; i--) {
+      if (chat.messages[i].role === "user") return i;
+    }
+    return -1;
+  })();
+
   const apiMessages = [];
-  for (const m of chat.messages) {
+  chat.messages.forEach((m, idx) => {
     if (m.role === "user") {
       let content = m.content || "";
       if (m.attachments && m.attachments.length) {
         content +=
           "\n\n[Załączniki: " +
-          m.attachments.map((a) => a.path || a.name).join(", ") +
+          m.attachments.map((a) => a.name || a.path).join(", ") +
           "]";
       }
-      // Multimodal: include last user images as data URLs when present on THIS message
-      if (m.attachments && m.attachments.some((a) => a.kind === "image" && a.path)) {
+      const withImages =
+        idx === lastUserIdx &&
+        m.attachments &&
+        m.attachments.some((a) => a.kind === "image" && a.path);
+      if (withImages) {
         const parts = [{ type: "text", text: content || " " }];
         for (const a of m.attachments) {
           if (a.kind === "image" && a.path && fs.existsSync(a.path)) {
@@ -410,23 +534,46 @@ async function sendHomeChat({
     } else if (m.role === "assistant") {
       apiMessages.push({ role: "assistant", content: m.content || "" });
     }
-  }
-
-  // If current attachments have images, ensure current user turn includes them
-  // (already in chat.messages via append)
+  });
 
   status("responding", "Piszę odpowiedź…");
-  const res = await xai.chatCompletions(token, {
-    model: model.includes("imagine") ? "grok-4.5" : model,
-    messages: apiMessages,
-    max_tokens: 4096,
-  });
-  const reply =
-    (res.choices &&
-      res.choices[0] &&
-      res.choices[0].message &&
-      res.choices[0].message.content) ||
-    "";
+  // Streaming: tekst leci do UI na bieżąco, jak w Build.
+  let reply = "";
+  try {
+    reply = await xai.chatCompletionsStream(
+      token,
+      {
+        model: model.includes("imagine") ? "grok-4.5" : model,
+        messages: apiMessages,
+        max_tokens: settings.homeMaxTokens || 8192,
+        signal,
+      },
+      (delta) => {
+        send("chat:update", {
+          sessionId: chat.id,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { text: delta },
+          },
+        });
+      }
+    );
+  } catch (err) {
+    if (signal.aborted) throw new Error("Przerwano");
+    // Awaryjnie bez streamu (np. gdy endpoint nie wspiera SSE)
+    const res = await xai.chatCompletions(token, {
+      model: model.includes("imagine") ? "grok-4.5" : model,
+      messages: apiMessages,
+      max_tokens: settings.homeMaxTokens || 8192,
+      signal,
+    });
+    reply =
+      (res.choices &&
+        res.choices[0] &&
+        res.choices[0].message &&
+        res.choices[0].message.content) ||
+      "";
+  }
 
   const assistantMsg = {
     id: `a-${Date.now()}`,
@@ -491,7 +638,8 @@ function registerIpc() {
       return await getUsage({
         sessionId: (payload && payload.sessionId) || null,
         grokHome: settings.grokHome,
-        includeRate: payload ? payload.includeRate !== false : true,
+        readBrowserCookies: settings.readBrowserCookies,
+        pythonPath: settings.pythonPath,
       });
     } catch (err) {
       return { ok: false, error: err.message };
@@ -515,6 +663,7 @@ function registerIpc() {
   ipcMain.handle("settings:get", async () => getSettings());
 
   ipcMain.handle("settings:set", async (_e, partial) => {
+    const before = getSettings();
     const next = saveSettings(userDataDir(), partial || {});
     if (partial && partial.modelId && acp) {
       try {
@@ -523,8 +672,21 @@ function registerIpc() {
         send("chat:error", { message: err.message });
       }
     }
+    // Tryb uprawnień to flaga CLI — wymaga restartu procesu agenta
+    if (
+      partial &&
+      partial.permissionMode &&
+      partial.permissionMode !== before.permissionMode &&
+      acp
+    ) {
+      try {
+        await acp.setPermissionMode(partial.permissionMode);
+      } catch (err) {
+        send("chat:error", { message: err.message });
+      }
+    }
     startWatchers();
-    pushSessions();
+    pushSessions(true);
     return next;
   });
 
@@ -607,9 +769,16 @@ function registerIpc() {
     if (!hasText && !hasAtt) {
       return { ok: false, error: "Pusta wiadomość" };
     }
-    if (promptBusy) return { ok: false, error: "Agent jeszcze pracuje" };
+    const lane = mode === "home" ? "home" : "grok";
+    if (promptBusy[lane]) {
+      return {
+        ok: false,
+        error:
+          lane === "home" ? "Home jeszcze odpowiada" : "Agent jeszcze pracuje",
+      };
+    }
 
-    promptBusy = true;
+    promptBusy[lane] = true;
     send("chat:busy", {
       busy: true,
       sessionId: sessionId || null,
@@ -656,9 +825,18 @@ function registerIpc() {
       status("error", err.message);
       return { ok: false, error: err.message };
     } finally {
-      promptBusy = false;
-      send("chat:busy", { busy: false, sessionId: null });
+      promptBusy[lane] = false;
+      if (lane === "home") homeAbort = null;
+      send("chat:busy", { busy: false, sessionId: null, mode: lane });
     }
+  });
+
+  ipcMain.handle("chat:permission-reply", async (_e, payload) => {
+    const { id, optionId } = payload || {};
+    if (id == null || !acp) return { ok: false, error: "Brak agenta" };
+    const ok = acp.respondPermission(id, optionId || null);
+    pendingPermissions.delete(id);
+    return { ok };
   });
 
   ipcMain.handle("chat:set-effort", async (_e, effort) => {
@@ -699,24 +877,38 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle("chat:stop", async () => {
+  ipcMain.handle("chat:stop", async (_e, payload) => {
+    const mode = (payload && payload.mode) || null;
+
+    // Home: przerwij żądanie HTTP. Wcześniej Stop nic tu nie robił, więc
+    // odpowiedź i tak dochodziła i dopisywała się do czatu.
+    if (mode === "home" || (!mode && promptBusy.home)) {
+      const had = Boolean(homeAbort);
+      if (homeAbort) homeAbort.abort();
+      homeAbort = null;
+      promptBusy.home = false;
+      send("chat:busy", { busy: false, mode: "home" });
+      status("stopped", "Przerwano");
+      if (mode === "home") return { ok: true, stopped: had, mode: "home" };
+    }
+
     try {
       if (!acp) {
-        promptBusy = false;
-        send("chat:busy", { busy: false });
+        promptBusy.grok = false;
+        send("chat:busy", { busy: false, mode: "grok" });
         return { ok: true, stopped: false };
       }
       const sid = acp.sessionId;
       await acp.stop();
       acp = null;
-      promptBusy = false;
-      send("chat:busy", { busy: false });
+      promptBusy.grok = false;
+      send("chat:busy", { busy: false, mode: "grok" });
       status("stopped", "Przerwano");
       ensureAcp().catch(() => {});
       return { ok: true, stopped: true, sessionId: sid };
     } catch (err) {
-      promptBusy = false;
-      send("chat:busy", { busy: false });
+      promptBusy.grok = false;
+      send("chat:busy", { busy: false, mode: "grok" });
       return { ok: false, error: err.message };
     }
   });
@@ -877,19 +1069,68 @@ function registerIpc() {
   });
 }
 
-app.whenReady().then(() => {
-  registerIpc();
-  createWindow();
-  startWatchers();
-  setTimeout(pushSessions, 200);
-  ensureAcp().catch((err) => {
-    send("chat:error", { message: `Agent: ${err.message}` });
+// Before ready: name in menu / Dock label (not "Electron")
+try {
+  app.setName("SuperGrok Desktop SoskyApp");
+} catch (_) {
+  /* ignore */
+}
+
+// Stały katalog danych — nie rozjeżdżaj się między "Electron" a nazwą produktu
+try {
+  app.setPath(
+    "userData",
+    path.join(app.getPath("home"), "Library/Application Support/SuperGrok Desktop SoskyApp")
+  );
+} catch (_) {
+  /* ignore */
+}
+
+// Preferuj arm64 (Apple Silicon) — mniej ostrzeżeń „Intel / future macOS”
+try {
+  if (app.commandLine && process.arch === "arm64") {
+    app.commandLine.appendSwitch("enable-features", "ScreenCaptureKitPickerScreen");
+  }
+} catch (_) {
+  /* ignore */
+}
+
+// Jedna instancja: drugie kliknięcie = fokus, nie drugi zombie + „Wymuś zakończenie”
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.exit(0);
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    } else {
+      createWindow();
+    }
   });
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  app.whenReady().then(() => {
+    applyDockIcon();
+    registerIpc();
+    createWindow();
+    // re-apply after window (some Electron builds reset dock icon)
+    applyDockIcon();
+    startWatchers();
+    setTimeout(pushSessions, 200);
+    ensureAcp().catch((err) => {
+      send("chat:error", { message: `Agent: ${err.message}` });
+    });
+
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      else if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    });
   });
-});
+}
 
 app.on("window-all-closed", async () => {
   clearWatchers();

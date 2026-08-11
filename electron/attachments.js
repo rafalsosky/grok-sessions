@@ -160,7 +160,7 @@ function stripAttachmentAppendix(text) {
     ""
   );
   t = t.replace(
-    /"\/Users\/[^"]*\/grok-sessions\/attachments\/[^"]+"/g,
+    /"[^"]*[\/\\]attachments[\/\\][^"]+"/g,
     ""
   );
 

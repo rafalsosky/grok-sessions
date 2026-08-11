@@ -132,8 +132,14 @@ class AcpClient extends EventEmitter {
       return;
     }
 
-    // Reverse request FROM agent TO client (should be rare with empty capabilities)
+    // Reverse request FROM agent TO client
     if (data.method && data.id != null && data.result === undefined && !data.error) {
+      // Tryb "ask": agent pyta o zgodę na narzędzie — przekaż do UI zamiast
+      // odsyłać method-not-found (to wcześniej wymuszało always-approve).
+      if (/request_permission/i.test(data.method)) {
+        this.emit("permission", { id: data.id, params: data.params || {} });
+        return;
+      }
       this._replyMethodNotFound(data.id, data.method);
       return;
     }
@@ -162,6 +168,40 @@ class AcpClient extends EventEmitter {
     } catch {
       /* ignore */
     }
+  }
+
+  /** Odpowiedź na session/request_permission. optionId = null → odmowa. */
+  respondPermission(id, optionId) {
+    if (!this.proc || !this.proc.stdin.writable) return false;
+    const outcome = optionId
+      ? { outcome: "selected", optionId }
+      : { outcome: "cancelled" };
+    try {
+      this.proc.stdin.write(
+        JSON.stringify({ jsonrpc: "2.0", id, result: { outcome } }) + "\n"
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Zmiana trybu uprawnień wymaga restartu procesu (flaga CLI). */
+  async setPermissionMode(mode) {
+    const next = mode === "ask" ? false : true;
+    if (this.alwaysApprove === next) return { ok: true, changed: false };
+    this.alwaysApprove = next;
+    const sid = this.sessionId;
+    await this.stop();
+    await this.start();
+    if (sid) {
+      try {
+        await this.ensureSession({ sessionId: sid, cwd: require("os").homedir() });
+      } catch {
+        /* nowa sesja, gdy load nie wyjdzie */
+      }
+    }
+    return { ok: true, changed: true, alwaysApprove: this.alwaysApprove };
   }
 
   request(method, params, { timeoutMs = 120000 } = {}) {
@@ -227,7 +267,8 @@ class AcpClient extends EventEmitter {
     const res = await this.request("session/new", {
       cwd,
       mcpServers: [],
-      _meta: { yoloMode: true },
+      // yoloMode tylko w trybie "auto" — w "ask" agent ma pytać o narzędzia
+      _meta: { yoloMode: this.alwaysApprove },
     });
     this.sessionId = res.sessionId;
     this._applyModels(res);
@@ -332,6 +373,23 @@ class AcpClient extends EventEmitter {
       } catch {
         /* ignore */
       }
+      // SIGTERM sam nie wystarczy: zawieszony `grok` zostawał jako sierota
+      // po zamknięciu apki. Daj 3 s, potem SIGKILL.
+      await new Promise((resolve) => {
+        if (p.exitCode !== null || p.signalCode) return resolve();
+        const t = setTimeout(() => {
+          try {
+            p.kill("SIGKILL");
+          } catch {
+            /* ignore */
+          }
+          resolve();
+        }, 3000);
+        p.once("exit", () => {
+          clearTimeout(t);
+          resolve();
+        });
+      });
     }
     for (const [, pend] of this.pending) {
       pend.reject(new Error("stopped"));

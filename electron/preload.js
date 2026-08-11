@@ -17,7 +17,9 @@ contextBridge.exposeInMainWorld("grokSessions", {
   chatSend: (payload) => ipcRenderer.invoke("chat:send", payload),
   chatSetModel: (payload) => ipcRenderer.invoke("chat:set-model", payload),
   chatSetEffort: (effort) => ipcRenderer.invoke("chat:set-effort", effort),
-  chatStop: () => ipcRenderer.invoke("chat:stop"),
+  chatStop: (payload) => ipcRenderer.invoke("chat:stop", payload || {}),
+  permissionReply: (payload) =>
+    ipcRenderer.invoke("chat:permission-reply", payload),
   renameSession: (payload) => ipcRenderer.invoke("session:rename", payload),
   deleteSession: (payload) => ipcRenderer.invoke("session:delete", payload),
   revealSession: (dirPath) => ipcRenderer.invoke("session:reveal", dirPath),
@@ -56,5 +58,10 @@ contextBridge.exposeInMainWorld("grokSessions", {
     const handler = (_e, data) => cb(data);
     ipcRenderer.on("chat:status", handler);
     return () => ipcRenderer.removeListener("chat:status", handler);
+  },
+  onChatPermission: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on("chat:permission", handler);
+    return () => ipcRenderer.removeListener("chat:permission", handler);
   },
 });

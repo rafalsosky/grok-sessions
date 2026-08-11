@@ -1,7 +1,7 @@
 {
   "name": "supergrok-desktop-soskyapp",
   "productName": "SuperGrok Desktop SoskyApp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "SuperGrok Desktop SoskyApp — desktop shell for SuperGrok / Grok Build (Home + Build agent UI)",
   "main": "electron/main.js",
   "private": true,
@@ -9,7 +9,9 @@
     "start": "electron .",
     "dev": "electron .",
     "verify-sessions": "node scripts/verify-sessions.js",
-    "smoke": "node scripts/e2e-smoke.js"
+    "smoke": "node scripts/e2e-smoke.js",
+    "make-app": "bash scripts/make-app.sh",
+    "test": "node scripts/test-units.js"
   },
   "engines": {
     "node": ">=18"

@@ -89,10 +89,17 @@ function renameHomeChat(userDataDir, id, title) {
 
 function appendHomeMessage(userDataDir, id, message) {
   let chat = loadHomeChat(userDataDir, id);
-  if (!chat) chat = createHomeChat(userDataDir);
-  if (chat.id !== id && id) {
-    // recreate with given id if missing
-    chat.id = id;
+  if (!chat) {
+    // Nie przez createHomeChat: to zapisywało plik pod nowym UUID, a potem
+    // drugi pod żądanym id — pusta sierota zostawała na dysku.
+    const now = new Date().toISOString();
+    chat = {
+      id: id || newId(),
+      title: "New chat",
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+    };
   }
   chat.messages.push(message);
   chat.updatedAt = new Date().toISOString();

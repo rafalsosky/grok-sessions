@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const { execFile } = require("child_process");
 const { resolveGrokHome, readJsonSafe, loadActiveMap, UUID_RE } =
   require("./sessions");
 
@@ -60,38 +61,38 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-function httpsJson({ hostname, path: p, method = "GET", token, body }) {
+function httpsRequest({
+  hostname,
+  path: p,
+  method = "GET",
+  headers = {},
+  body = null,
+  timeout = 12000,
+}) {
   return new Promise((resolve) => {
-    const payload = body != null ? JSON.stringify(body) : null;
-    const headers = {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-      "User-Agent": "GrokSessions/0.1",
-      Origin: "https://grok.com",
-      Referer: "https://grok.com/",
-    };
-    if (payload) {
-      headers["Content-Type"] = "application/json";
-      headers["Content-Length"] = Buffer.byteLength(payload);
+    const payload =
+      body == null
+        ? null
+        : Buffer.isBuffer(body)
+          ? body
+          : Buffer.from(
+              typeof body === "string" ? body : JSON.stringify(body),
+              "utf8"
+            );
+    const hdrs = { ...headers };
+    if (payload && !hdrs["Content-Length"]) {
+      hdrs["Content-Length"] = String(payload.length);
     }
     const req = https.request(
-      { hostname, path: p, method, headers, timeout: 12000 },
+      { hostname, path: p, method, headers: hdrs, timeout },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => {
-          const raw = Buffer.concat(chunks).toString("utf8");
-          let json = null;
-          try {
-            json = JSON.parse(raw);
-          } catch {
-            /* ignore */
-          }
           resolve({
             status: res.statusCode,
             headers: res.headers || {},
-            json,
-            raw: raw.slice(0, 500),
+            body: Buffer.concat(chunks),
           });
         });
       }
@@ -106,45 +107,424 @@ function httpsJson({ hostname, path: p, method = "GET", token, body }) {
   });
 }
 
-let rateCache = { at: 0, data: null };
-let planCache = { at: 0, data: null };
-
-async function probeApiRate(token) {
-  const now = Date.now();
-  if (rateCache.data && now - rateCache.at < 60_000) return rateCache.data;
-  const res = await httpsJson({
-    hostname: "api.x.ai",
-    path: "/v1/chat/completions",
-    method: "POST",
-    token,
-    body: {
-      model: "grok-4-1-fast-non-reasoning",
-      messages: [{ role: "user", content: "ping" }],
-      max_tokens: 1,
-    },
-  });
-  if (!res) return null;
-  const h = res.headers;
-  const data = {
-    tokensLimit: num(h["x-ratelimit-limit-tokens"]),
-    tokensRemaining: num(h["x-ratelimit-remaining-tokens"]),
-    requestsLimit: num(h["x-ratelimit-limit-requests"]),
-    requestsRemaining: num(h["x-ratelimit-remaining-requests"]),
-    ok: res.status >= 200 && res.status < 300,
-    status: res.status,
+function httpsJson({ hostname, path: p, method = "GET", token, body, cookie }) {
+  const headers = {
+    Accept: "application/json",
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    Origin: "https://grok.com",
+    Referer: "https://grok.com/",
   };
-  rateCache = { at: Date.now(), data };
-  return data;
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (cookie) headers.Cookie = cookie;
+  if (body != null) headers["Content-Type"] = "application/json";
+  return httpsRequest({ hostname, path: p, method, headers, body }).then(
+    (res) => {
+      if (!res) return null;
+      let json = null;
+      const raw = res.body.toString("utf8");
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        /* ignore */
+      }
+      return {
+        status: res.status,
+        headers: res.headers,
+        json,
+        raw: raw.slice(0, 500),
+      };
+    }
+  );
+}
+
+/* ─── Browser cookies (Arc/Chrome via rookiepy) for weekly % ─── */
+
+const COOKIE_DOMAINS = ["grok.com", ".grok.com", "x.ai", ".x.ai", "auth.x.ai"];
+const COOKIE_NAMES = new Set(["sso", "sso-rw", "cf_clearance", "__cf_bm"]);
+let cookieCache = { at: 0, header: null, error: null };
+
+/**
+ * Python z modułem rookiepy. Kolejność: jawne ustawienie użytkownika,
+ * potem PATH, potem typowe lokalizacje. Zero ścieżek zaszytych pod
+ * konkretne konto — patrz README, sekcja „Tygodniowy %".
+ */
+function findRookiePython(explicitPath) {
+  const candidates = [];
+  if (explicitPath) candidates.push(expandUser(explicitPath));
+  if (process.env.GROK_SESSIONS_PYTHON) {
+    candidates.push(expandUser(process.env.GROK_SESSIONS_PYTHON));
+  }
+  const home = process.env.HOME || "";
+  const dirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  for (const d of dirs) {
+    candidates.push(path.join(d, "python3"), path.join(d, "python"));
+  }
+  candidates.push(
+    path.join(home, ".local/bin/python3"),
+    "/opt/homebrew/bin/python3",
+    "/usr/local/bin/python3",
+    "/usr/bin/python3"
+  );
+  for (const p of candidates) {
+    try {
+      if (p && fs.existsSync(p)) {
+        fs.accessSync(p, fs.constants.X_OK);
+        return p;
+      }
+    } catch {
+      /* next */
+    }
+  }
+  return null;
+}
+
+function expandUser(p) {
+  if (!p) return p;
+  const home = process.env.HOME || "";
+  if (p === "~") return home;
+  if (p.startsWith("~/")) return path.join(home, p.slice(2));
+  return p;
 }
 
 /**
- * Plan / weekly SuperGrok Heavy usage (browser-style).
- * Subscriptions work with OIDC. Weekly rate-limits are blocked for OAuth2
- * tokens by xAI — we still try and surface a clear status.
+ * NIE spawnSync — to blokowało cały proces main (zamrożone UI i strumień
+ * agenta na czas odczytu ciasteczek). execFile + Promise.
  */
-async function fetchPlanUsage(token) {
+function loadBrowserCookieHeader(pythonPath) {
   const now = Date.now();
-  if (planCache.data && now - planCache.at < 120_000) return planCache.data;
+  if (cookieCache.header && now - cookieCache.at < 120_000) {
+    return Promise.resolve(cookieCache.header);
+  }
+  if (cookieCache.error && now - cookieCache.at < 120_000) {
+    // nie próbuj co odświeżenie, gdy i tak nie ma czego czytać
+    return Promise.resolve(null);
+  }
+  const py = findRookiePython(pythonPath);
+  if (!py) {
+    cookieCache = {
+      at: now,
+      header: null,
+      error: "Brak Pythona z modułem rookiepy (patrz README)",
+    };
+    return Promise.resolve(null);
+  }
+  const script = `
+import json, sys
+try:
+    import rookiepy
+except Exception as e:
+    print(json.dumps({"ok": False, "error": "rookiepy: " + str(e)}))
+    sys.exit(0)
+domains = ${JSON.stringify(COOKIE_DOMAINS)}
+names = set(${JSON.stringify([...COOKIE_NAMES])})
+cookies = []
+for browser in ("arc", "chrome", "chromium"):
+    getter = getattr(rookiepy, browser, None)
+    if not getter:
+        continue
+    try:
+        got = getter(domains) or []
+    except Exception:
+        continue
+    if got:
+        cookies = got
+        break
+if not cookies:
+    print(json.dumps({"ok": False, "error": "Brak ciasteczek grok.com (zaloguj w Arc/Chrome)"}))
+    sys.exit(0)
+picked = [c for c in cookies if c.get("name") in names]
+if not picked:
+    picked = cookies
+header = "; ".join(f"{c['name']}={c['value']}" for c in picked)
+print(json.dumps({"ok": True, "header": header, "count": len(picked)}))
+`;
+  return new Promise((resolve) => {
+    execFile(
+      py,
+      ["-c", script],
+      { encoding: "utf8", timeout: 15000, env: process.env },
+      (err, stdout, stderr) => {
+        const at = Date.now();
+        const line = (stdout || "").trim().split("\n").pop() || "";
+        let data = null;
+        try {
+          data = JSON.parse(line);
+        } catch {
+          cookieCache = {
+            at,
+            header: null,
+            error: ((err && err.message) || stderr || "cookie script fail").slice(
+              0,
+              160
+            ),
+          };
+          return resolve(null);
+        }
+        if (!data.ok || !data.header) {
+          cookieCache = { at, header: null, error: data.error || "Brak ciasteczek" };
+          return resolve(null);
+        }
+        cookieCache = { at, header: data.header, error: null };
+        resolve(data.header);
+      }
+    );
+  });
+}
+
+/* ─── Protobuf (minimal) for GetGrokCreditsConfig ─── */
+
+function readVarint(buf, i) {
+  let result = 0;
+  let shift = 0;
+  while (i < buf.length) {
+    const b = buf[i++];
+    result |= (b & 0x7f) << shift;
+    if (!(b & 0x80)) break;
+    shift += 7;
+    if (shift > 56) break;
+  }
+  return [result, i];
+}
+
+function parseFields(buf) {
+  const fields = [];
+  let i = 0;
+  while (i < buf.length) {
+    const [key, i2] = readVarint(buf, i);
+    if (i2 === i) break;
+    i = i2;
+    const field = key >>> 3;
+    const wt = key & 7;
+    if (wt === 0) {
+      const [val, ni] = readVarint(buf, i);
+      i = ni;
+      fields.push({ field, wt: "varint", val });
+    } else if (wt === 1) {
+      if (i + 8 > buf.length) break;
+      const val = buf.readDoubleLE(i);
+      i += 8;
+      fields.push({ field, wt: "fixed64", val });
+    } else if (wt === 2) {
+      const [ln, ni] = readVarint(buf, i);
+      i = ni;
+      const data = buf.subarray(i, i + ln);
+      i += ln;
+      let nested = null;
+      try {
+        nested = parseFields(data);
+      } catch {
+        nested = null;
+      }
+      fields.push({ field, wt: "bytes", data, nested });
+    } else if (wt === 5) {
+      if (i + 4 > buf.length) break;
+      const fval = buf.readFloatLE(i);
+      i += 4;
+      fields.push({ field, wt: "fixed32", val: fval });
+    } else {
+      break;
+    }
+  }
+  return fields;
+}
+
+function parseGrpcWebFrames(buf) {
+  const frames = [];
+  let i = 0;
+  while (i + 5 <= buf.length) {
+    // text trailers sometimes glued
+    if (
+      buf[i] === 0x67 &&
+      buf.subarray(i, i + 11).toString("utf8") === "grpc-status"
+    ) {
+      frames.push({ flags: 0x80, payload: buf.subarray(i) });
+      break;
+    }
+    const flags = buf[i];
+    const length = buf.readUInt32BE(i + 1);
+    i += 5;
+    const payload = buf.subarray(i, i + length);
+    i += length;
+    frames.push({ flags, payload });
+    if (flags & 0x80) break;
+  }
+  return frames;
+}
+
+const PRODUCT_LABEL = {
+  0: "Unspecified",
+  1: "API",
+  2: "Grok Build",
+  3: "Plugins",
+  4: "Chat",
+  5: "Imagine",
+  6: "Voice",
+  7: "App Builder",
+};
+
+const PERIOD_LABEL = {
+  0: "unspecified",
+  1: "monthly",
+  2: "weekly",
+};
+
+function extractTimestampSeconds(fields) {
+  if (!fields) return null;
+  for (const f of fields) {
+    if (f.field === 1 && f.wt === "varint") return f.val;
+  }
+  return null;
+}
+
+function parseCreditsConfig(fields) {
+  // Response: field 1 = GrokCreditsConfig message
+  const config =
+    fields.find((f) => f.field === 1 && f.wt === "bytes" && f.nested) || null;
+  if (!config) return null;
+  const cf = config.nested;
+  let creditUsagePercent = null;
+  let resetsAt = null;
+  let periodStart = null;
+  let periodType = null;
+  const products = [];
+
+  for (const f of cf) {
+    // overall percent (float)
+    if (f.wt === "fixed32" && f.val >= 0 && f.val <= 100) {
+      if (creditUsagePercent == null) creditUsagePercent = f.val;
+    }
+    // ProductUsage-like: enum + float
+    if (f.wt === "bytes" && f.nested) {
+      let product = null;
+      let pct = null;
+      let type = null;
+      let startSec = null;
+      let endSec = null;
+      for (const n of f.nested) {
+        if (n.wt === "varint" && n.field === 1 && n.val >= 0 && n.val <= 20) {
+          // could be product enum or period type
+          if (product == null) product = n.val;
+          if (type == null) type = n.val;
+        }
+        if (n.wt === "fixed32" && n.val >= 0 && n.val <= 100) {
+          pct = n.val;
+        }
+        if (n.wt === "bytes" && n.nested) {
+          const sec = extractTimestampSeconds(n.nested);
+          if (sec != null) {
+            if (startSec == null) startSec = sec;
+            else if (endSec == null) endSec = sec;
+          }
+        }
+      }
+      // Product usage row (has both product enum 1-7 and percent)
+      if (product != null && pct != null && product >= 1 && product <= 10) {
+        products.push({
+          product,
+          label: PRODUCT_LABEL[product] || `product ${product}`,
+          percent: Math.round(pct * 10) / 10,
+        });
+      }
+      // Period message: type + two timestamps
+      if (type != null && startSec != null && endSec != null && pct == null) {
+        periodType = PERIOD_LABEL[type] || String(type);
+        periodStart = startSec;
+        resetsAt = endSec;
+      }
+      // top-level timestamps without period wrapper
+      if (startSec != null && endSec == null && product == null && pct == null) {
+        // single timestamp fields inside config
+        if (!periodStart) periodStart = startSec;
+        else if (!resetsAt) resetsAt = startSec;
+      }
+    }
+  }
+
+  // Prefer Grok Build product percent for the main bar (this app is Build)
+  const build = products.find((p) => p.product === 2) || products[0] || null;
+  const percent =
+    build?.percent != null
+      ? build.percent
+      : creditUsagePercent != null
+        ? Math.round(creditUsagePercent * 10) / 10
+        : null;
+
+  if (percent == null) return null;
+
+  return {
+    percent,
+    creditUsagePercent:
+      creditUsagePercent != null
+        ? Math.round(creditUsagePercent * 10) / 10
+        : percent,
+    label: build?.label || "Grok Build",
+    products,
+    periodType: periodType || "weekly",
+    periodStart: periodStart ? new Date(periodStart * 1000).toISOString() : null,
+    resetsAt: resetsAt ? new Date(resetsAt * 1000).toISOString() : null,
+    windowLabel: periodType === "monthly" ? "miesiąc" : "tydzień",
+  };
+}
+
+async function fetchWeeklyFromBrowser(cookieHeader) {
+  // Empty protobuf request, grpc-web envelope
+  const empty = Buffer.alloc(5);
+  empty[0] = 0;
+  empty.writeUInt32BE(0, 1);
+
+  const res = await httpsRequest({
+    hostname: "grok.com",
+    path: "/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig",
+    method: "POST",
+    headers: {
+      Cookie: cookieHeader,
+      "Content-Type": "application/grpc-web+proto",
+      Accept: "application/grpc-web+proto",
+      "X-Grpc-Web": "1",
+      "X-User-Agent": "grpc-web-javascript/0.1",
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+      Origin: "https://grok.com",
+      Referer: "https://grok.com/settings/usage",
+    },
+    body: empty,
+    timeout: 15000,
+  });
+  if (!res || !res.body || !res.body.length) {
+    return { weekly: null, error: "Pusta odpowiedź credits" };
+  }
+  const frames = parseGrpcWebFrames(res.body);
+  const dataFrame = frames.find((f) => f.flags === 0);
+  if (!dataFrame) {
+    return { weekly: null, error: "Brak ramki gRPC" };
+  }
+  try {
+    const fields = parseFields(dataFrame.payload);
+    const weekly = parseCreditsConfig(fields);
+    if (!weekly) {
+      return { weekly: null, error: "Nie udało się odczytać % z odpowiedzi" };
+    }
+    return { weekly, error: null };
+  } catch (err) {
+    return { weekly: null, error: err.message || "parse fail" };
+  }
+}
+
+let planCache = { at: 0, data: null };
+
+// Usunięto probeApiRate: żeby odczytać nagłówki rate-limit, wysyłał prawdziwe
+// (płatne) zapytanie do /v1/chat/completions co odświeżenie panelu. UI i tak
+// nigdy tych danych nie pokazywał.
+
+/**
+ * Plan tier (OAuth token) + weekly SuperGrok % (browser cookies / sso).
+ * OAuth cannot call weekly — xAI returns oauth2-auth-forbidden.
+ * Weekly comes from GrokBuildBilling.GetGrokCreditsConfig via Arc/Chrome session.
+ */
+async function fetchPlanUsage(token, opts = {}) {
+  const now = Date.now();
+  if (planCache.data && now - planCache.at < 90_000) return planCache.data;
 
   const subRes = await httpsJson({
     hostname: "grok.com",
@@ -166,11 +546,8 @@ async function fetchPlanUsage(token) {
       tier = pick.tier || null;
       status = pick.status || null;
       billingPeriodEnd = pick.billingPeriodEnd || null;
-      // SuperGrok Heavy / Pro naming from productId + tier
       const product =
-        (pick.google && pick.google.productId) ||
-        pick.productId ||
-        "";
+        (pick.google && pick.google.productId) || pick.productId || "";
       if (/ultra|heavy/i.test(product) || /PRO|HEAVY|ULTRA/i.test(String(tier))) {
         tierLabel = "SuperGrok Heavy";
       } else if (/lite/i.test(product) || /LITE/i.test(String(tier))) {
@@ -183,28 +560,63 @@ async function fetchPlanUsage(token) {
     }
   }
 
-  // Browser weekly limit — blocked for OIDC/OAuth2 build tokens
-  const rlRes = await httpsJson({
-    hostname: "grok.com",
-    path: "/rest/rate-limits",
-    method: "POST",
-    token,
-    body: {},
-  });
-
   let weekly = null;
   let weeklyError = null;
-  if (rlRes && rlRes.status === 200 && rlRes.json) {
-    weekly = parseWeeklyFromRateLimits(rlRes.json);
-  } else if (rlRes && rlRes.json && rlRes.json.message) {
-    weeklyError =
-      /oauth2/i.test(rlRes.json.message) || /WKE=unauthorized/i.test(rlRes.json.message)
-        ? "xAI blokuje % tygodniowy dla tokena Build (tylko przeglądarka)"
-        : String(rlRes.json.message).slice(0, 160);
-  } else if (rlRes && rlRes.status) {
-    weeklyError = `rate-limits HTTP ${rlRes.status}`;
+  let weeklySource = null;
+
+  // Domyślnie WYŁĄCZONE: czytanie ciasteczek przeglądarki to dostęp do
+  // zalogowanej sesji użytkownika. Włącza się świadomie w Ustawieniach.
+  const cookieHeader = opts.readBrowserCookies
+    ? await loadBrowserCookieHeader(opts.pythonPath)
+    : null;
+  if (cookieHeader) {
+    const fromBrowser = await fetchWeeklyFromBrowser(cookieHeader);
+    if (fromBrowser.weekly) {
+      weekly = fromBrowser.weekly;
+      weeklySource = "browser-session";
+    } else {
+      weeklyError =
+        fromBrowser.error ||
+        cookieCache.error ||
+        "Nie odczytano limitu z sesji przeglądarki";
+    }
   } else {
-    weeklyError = "Brak odpowiedzi rate-limits";
+    // fallback: try OAuth rate-limits (usually blocked)
+    const rlRes = await httpsJson({
+      hostname: "grok.com",
+      path: "/rest/rate-limits",
+      method: "POST",
+      token,
+      body: { modelName: "build" },
+    });
+    if (rlRes && rlRes.status === 200 && rlRes.json) {
+      const total = num(rlRes.json.totalQueries);
+      const rem = num(rlRes.json.remainingQueries);
+      if (total != null && rem != null && total > 0) {
+        const usedPct = Math.round(((total - rem) / total) * 100);
+        weekly = {
+          percent: usedPct,
+          label: "Build (okno 2 h)",
+          resetsAt: null,
+          windowLabel: "2 h",
+          periodType: "short",
+        };
+        weeklySource = "oauth-short-window";
+      }
+    } else if (rlRes && rlRes.json && rlRes.json.message) {
+      weeklyError =
+        /oauth2/i.test(rlRes.json.message) ||
+        /WKE=unauthorized/i.test(rlRes.json.message)
+          ? "Zaloguj się w Arc/Chrome na grok.com — stamtąd bierzemy % tygodniowy (token Build tego nie widzi)"
+          : String(rlRes.json.message).slice(0, 160);
+    } else if (!opts.readBrowserCookies) {
+      weeklyError =
+        "Tygodniowy % wymaga sesji przeglądarki. Włącz w Ustawieniach: „Czytaj ciasteczka grok.com z Arc/Chrome”.";
+    } else {
+      weeklyError =
+        cookieCache.error ||
+        "Brak sesji przeglądarki (Arc/Chrome zalogowany na grok.com)";
+    }
   }
 
   const data = {
@@ -212,87 +624,24 @@ async function fetchPlanUsage(token) {
     tierLabel: tierLabel || "SuperGrok",
     status,
     billingPeriodEnd,
-    weekly, // { percent, label, resetsAt, windowLabel } | null
+    weekly,
     weeklyError,
-    weeklyUrl: "https://grok.com/", // settings → Zużycie
+    weeklySource,
+    weeklyUrl: "https://grok.com/settings/usage",
   };
   planCache = { at: Date.now(), data };
   return data;
 }
 
-function parseWeeklyFromRateLimits(json) {
-  if (!json || typeof json !== "object") return null;
-  // tolerate several shapes seen in xAI clients
-  const candidates = [];
-  const push = (o, label) => {
-    if (!o || typeof o !== "object") return;
-    const pct =
-      num(o.percentUsed) ??
-      num(o.percent_used) ??
-      num(o.usedPercent) ??
-      num(o.usagePercent) ??
-      (num(o.remaining) != null && num(o.limit)
-        ? Math.round(((o.limit - o.remaining) / o.limit) * 100)
-        : null) ??
-      (num(o.used) != null && num(o.limit)
-        ? Math.round((o.used / o.limit) * 100)
-        : null);
-    if (pct == null) return;
-    candidates.push({
-      percent: Math.max(0, Math.min(100, pct)),
-      label:
-        label ||
-        o.name ||
-        o.windowName ||
-        o.feature ||
-        o.limitName ||
-        "Weekly",
-      resetsAt:
-        o.resetsAt ||
-        o.resetTime ||
-        o.reset_at ||
-        o.windowEnd ||
-        o.expiresAt ||
-        null,
-      windowLabel: o.windowLabel || o.period || "tydzień",
-    });
-  };
-
-  if (Array.isArray(json.rateLimits)) {
-    for (const r of json.rateLimits) push(r, r.name);
-  }
-  if (Array.isArray(json.limits)) {
-    for (const r of json.limits) push(r, r.name);
-  }
-  if (json.weekly) push(json.weekly, "Weekly");
-  if (json.superGrokHeavy) push(json.superGrokHeavy, "SuperGrok Heavy");
-  if (json.usage) push(json.usage, "Usage");
-  // nested map
-  for (const [k, v] of Object.entries(json)) {
-    if (v && typeof v === "object" && !Array.isArray(v)) {
-      if (
-        /week|heavy|build|limit/i.test(k) ||
-        "percentUsed" in v ||
-        "used" in v
-      ) {
-        push(v, k);
-      }
-    }
-  }
-  if (!candidates.length) return null;
-  // prefer weekly / heavy / build
-  candidates.sort((a, b) => {
-    const score = (x) =>
-      (/heavy|week|build/i.test(x.label) ? 10 : 0) + (x.percent || 0) / 100;
-    return score(b) - score(a);
-  });
-  return candidates[0];
-}
-
 /**
- * @param {{ sessionId?: string, grokHome?: string, includeRate?: boolean }} opts
+ * @param {{ sessionId?: string, grokHome?: string,
+ *           readBrowserCookies?: boolean, pythonPath?: string }} opts
  */
 async function getUsage(opts = {}) {
+  const planOpts = {
+    readBrowserCookies: Boolean(opts.readBrowserCookies),
+    pythonPath: opts.pythonPath || "",
+  };
   const grokHome = resolveGrokHome(opts.grokHome);
   const sessionId = opts.sessionId || null;
   const sessionDir = sessionId ? findSessionDir(grokHome, sessionId) : null;
@@ -301,22 +650,30 @@ async function getUsage(opts = {}) {
   const active = sessionId ? activeMap.get(sessionId) : null;
   const auth = loadAuthKey(grokHome);
 
-  let rate = null;
   let plan = null;
-  if (opts.includeRate !== false && auth?.key) {
+  if (auth?.key) {
     try {
-      const [r, p] = await Promise.all([
-        probeApiRate(auth.key),
-        fetchPlanUsage(auth.key),
-      ]);
-      rate = r;
-      plan = p;
+      plan = await fetchPlanUsage(auth.key, planOpts);
     } catch {
       /* ignore */
     }
-  } else if (auth?.key) {
+  } else if (planOpts.readBrowserCookies) {
+    // bez OAuth zostaje tylko sesja przeglądarki — i tylko za zgodą
     try {
-      plan = await fetchPlanUsage(auth.key);
+      const cookieHeader = await loadBrowserCookieHeader(planOpts.pythonPath);
+      if (cookieHeader) {
+        const fromBrowser = await fetchWeeklyFromBrowser(cookieHeader);
+        plan = {
+          tier: null,
+          tierLabel: "SuperGrok",
+          status: null,
+          billingPeriodEnd: null,
+          weekly: fromBrowser.weekly,
+          weeklyError: fromBrowser.error,
+          weeklySource: fromBrowser.weekly ? "browser-session" : null,
+          weeklyUrl: "https://grok.com/settings/usage",
+        };
+      }
     } catch {
       /* ignore */
     }
@@ -349,7 +706,6 @@ async function getUsage(opts = {}) {
       cwd: active?.cwd || null,
     },
     plan,
-    rate,
     at: Date.now(),
   };
 }

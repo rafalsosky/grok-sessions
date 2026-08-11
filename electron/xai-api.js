@@ -17,9 +17,18 @@ function getAccessToken(grokHome) {
   }
 }
 
-function apiRequest(token, apiPath, body, { method = "POST", timeoutMs = 120000 } = {}) {
+function apiRequest(
+  token,
+  apiPath,
+  body,
+  { method = "POST", timeoutMs = 120000, signal = null } = {}
+) {
   const payload = body == null ? null : JSON.stringify(body);
   return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(new Error("Przerwano"));
+      return;
+    }
     const req = https.request(
       {
         hostname: "api.x.ai",
@@ -64,7 +73,119 @@ function apiRequest(token, apiPath, body, { method = "POST", timeoutMs = 120000 
       req.destroy();
       reject(new Error("xAI API timeout"));
     });
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          req.destroy();
+          reject(new Error("Przerwano"));
+        },
+        { once: true }
+      );
+    }
     if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+/**
+ * Strumieniowany czat (SSE). onDelta(text) leci na bieżąco.
+ * Zwraca pełną treść po zakończeniu.
+ */
+function chatCompletionsStream(
+  token,
+  { model, messages, max_tokens = 8192, signal = null },
+  onDelta
+) {
+  const payload = JSON.stringify({
+    model,
+    messages,
+    max_tokens,
+    stream: true,
+  });
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) {
+      reject(new Error("Przerwano"));
+      return;
+    }
+    const req = https.request(
+      {
+        hostname: "api.x.ai",
+        path: "/v1/chat/completions",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+          "User-Agent": "GrokSessions (desktop)",
+          "Content-Length": Buffer.byteLength(payload),
+        },
+        timeout: 300000,
+      },
+      (res) => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            let msg = text.slice(0, 300) || `HTTP ${res.statusCode}`;
+            try {
+              const j = JSON.parse(text);
+              msg = j.error || j.message || msg;
+            } catch {
+              /* raw */
+            }
+            reject(new Error(typeof msg === "string" ? msg : JSON.stringify(msg)));
+          });
+          return;
+        }
+        let full = "";
+        let buf = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          buf += chunk;
+          // SSE: zdarzenia rozdzielone pustą linią, pola po "data: "
+          let idx;
+          while ((idx = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 1);
+            if (!line.startsWith("data:")) continue;
+            const data = line.slice(5).trim();
+            if (!data || data === "[DONE]") continue;
+            try {
+              const j = JSON.parse(data);
+              const delta =
+                (j.choices && j.choices[0] && j.choices[0].delta &&
+                  j.choices[0].delta.content) || "";
+              if (delta) {
+                full += delta;
+                if (typeof onDelta === "function") onDelta(delta);
+              }
+            } catch {
+              /* niepełna ramka — pomiń */
+            }
+          }
+        });
+        res.on("end", () => resolve(full));
+        res.on("error", reject);
+      }
+    );
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("xAI API timeout"));
+    });
+    if (signal) {
+      signal.addEventListener(
+        "abort",
+        () => {
+          req.destroy();
+          reject(new Error("Przerwano"));
+        },
+        { once: true }
+      );
+    }
+    req.write(payload);
     req.end();
   });
 }
@@ -77,12 +198,16 @@ async function listModels(token) {
 /**
  * Chat completion. messages: OpenAI-style [{role, content:string|parts}]
  */
-async function chatCompletions(token, { model, messages, max_tokens = 4096 }) {
-  return apiRequest(token, "/v1/chat/completions", {
-    model,
-    messages,
-    max_tokens,
-  });
+async function chatCompletions(
+  token,
+  { model, messages, max_tokens = 8192, signal = null }
+) {
+  return apiRequest(
+    token,
+    "/v1/chat/completions",
+    { model, messages, max_tokens },
+    { signal }
+  );
 }
 
 /**
@@ -91,7 +216,7 @@ async function chatCompletions(token, { model, messages, max_tokens = 4096 }) {
  */
 async function generateImage(
   token,
-  { prompt, model = "grok-imagine-image", aspect_ratio = "1:1" }
+  { prompt, model = "grok-imagine-image", aspect_ratio = "1:1", signal = null }
 ) {
   const body = {
     model,
@@ -102,6 +227,7 @@ async function generateImage(
   if (aspect_ratio) body.aspect_ratio = aspect_ratio;
   const res = await apiRequest(token, "/v1/images/generations", body, {
     timeoutMs: 180000,
+    signal,
   });
   const item = res && res.data && res.data[0];
   if (!item || !item.b64_json) {
@@ -120,7 +246,7 @@ async function generateImage(
  */
 async function generateVideo(
   token,
-  { prompt, model = "grok-imagine-video", aspect_ratio = "16:9" }
+  { prompt, model = "grok-imagine-video", aspect_ratio = "16:9", signal = null }
 ) {
   const attempts = [
     {
@@ -148,6 +274,7 @@ async function generateVideo(
     try {
       const res = await apiRequest(token, a.path, a.body, {
         timeoutMs: 300000,
+        signal,
       });
       if (a.storyboardFallback) {
         const item = res && res.data && res.data[0];
@@ -179,19 +306,28 @@ async function generateVideo(
   throw lastErr || new Error("Video generation failed");
 }
 
+/**
+ * Czy to prośba o GRAFIKĘ.
+ *
+ * Poprzednia wersja łapała każde zdanie zaczynające się od „wygeneruj”,
+ * więc „wygeneruj listę 10 hooków” szło do generatora obrazów. Teraz sam
+ * czasownik nie wystarczy: musi paść też rzeczownik oznaczający obraz
+ * (albo jawna komenda /image).
+ */
 function looksLikeImagePrompt(text) {
-  const t = String(text || "").toLowerCase();
-  return (
-    /^(wygeneruj|narysuj|zrób grafik|zrob grafik|generate image|imagine|draw |stwórz obraz|stworz obraz|grafika:|image:)/i.test(
-      t.trim()
-    ) ||
-    t.includes("wygeneruj grafik") ||
-    t.includes("wygeneruj obraz") ||
-    t.includes("generate an image") ||
-    t.includes("generate a image") ||
-    t.startsWith("/image") ||
-    t.startsWith("/img")
-  );
+  const t = String(text || "").toLowerCase().trim();
+  if (/^\/(image|img)\b/.test(t)) return true;
+  if (/^(grafika|obraz|zdjęcie|zdjecie|ilustracja|image)\s*:/.test(t)) return true;
+
+  const verb =
+    /\b(wygeneruj|wygenerować|narysuj|narysować|zrób|zrob|stwórz|stworz|generate|create|draw|render|make)\b/;
+  const noun =
+    /\b(grafik\w*|obraz\w*|obrazek\w*|zdj[eę]ci\w*|ilustracj\w*|rysun\w*|plakat\w*|miniatur\w*|logo|render\w*|image|images|picture|illustration|artwork|thumbnail|poster)\b/;
+
+  if (verb.test(t) && noun.test(t)) return true;
+  // „imagine …” jako komenda na początku
+  if (/^imagine\b/.test(t)) return true;
+  return false;
 }
 
 function stripImageCommand(text) {
@@ -205,6 +341,7 @@ module.exports = {
   getAccessToken,
   listModels,
   chatCompletions,
+  chatCompletionsStream,
   generateImage,
   generateVideo,
   looksLikeImagePrompt,

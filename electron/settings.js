@@ -22,7 +22,23 @@ const DEFAULTS = {
   lastCodeSessionId: "",
   theme: "dark",
   effort: "high",
+  /** "auto" = --always-approve (agent działa bez pytania), "ask" = agent pyta */
+  permissionMode: "auto",
+  /** Czytanie ciasteczek grok.com z Arc/Chrome pod tygodniowy %. Opt-in. */
+  readBrowserCookies: false,
+  /** Python z rookiepy (puste = szukaj w PATH) */
+  pythonPath: "",
+  /** Limit odpowiedzi w trybie Home */
+  homeMaxTokens: 8192,
 };
+
+const PERMISSION_MODES = ["auto", "ask"];
+
+function clampTokens(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return DEFAULTS.homeMaxTokens;
+  return Math.max(1024, Math.min(32768, Math.round(n)));
+}
 
 function settingsPath(userDataDir) {
   return path.join(userDataDir, "settings.json");
@@ -55,6 +71,12 @@ function loadSettings(userDataDir) {
   if (!["low", "medium", "high", "xhigh"].includes(merged.effort)) {
     merged.effort = "high";
   }
+  if (!PERMISSION_MODES.includes(merged.permissionMode)) {
+    merged.permissionMode = "auto";
+  }
+  merged.readBrowserCookies = Boolean(merged.readBrowserCookies);
+  merged.pythonPath = merged.pythonPath ? expandHome(merged.pythonPath) : "";
+  merged.homeMaxTokens = clampTokens(merged.homeMaxTokens);
   merged.grokHome = grokHome;
   return merged;
 }
@@ -83,6 +105,12 @@ function saveSettings(userDataDir, partial) {
     effort: ["low", "medium", "high", "xhigh"].includes(next.effort)
       ? next.effort
       : "high",
+    permissionMode: PERMISSION_MODES.includes(next.permissionMode)
+      ? next.permissionMode
+      : "auto",
+    readBrowserCookies: Boolean(next.readBrowserCookies),
+    pythonPath: next.pythonPath || "",
+    homeMaxTokens: clampTokens(next.homeMaxTokens),
   };
   fs.mkdirSync(userDataDir, { recursive: true });
   fs.writeFileSync(

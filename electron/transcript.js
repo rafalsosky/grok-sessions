@@ -143,25 +143,4 @@ function loadTranscript(sessionDir) {
   return { messages: cleaned, error: null, path: updatesPath };
 }
 
-function summarizeTool(u) {
-  const parts = [];
-  if (u.path) parts.push(String(u.path));
-  if (u.locations && Array.isArray(u.locations)) {
-    parts.push(u.locations.map((l) => l.path || JSON.stringify(l)).join(", "));
-  }
-  if (u.content && typeof u.content === "object") {
-    if (u.content.text) parts.push(String(u.content.text).slice(0, 200));
-  }
-  if (u.rawInput) {
-    try {
-      const s =
-        typeof u.rawInput === "string" ? u.rawInput : JSON.stringify(u.rawInput);
-      parts.push(s.slice(0, 240));
-    } catch {
-      /* ignore */
-    }
-  }
-  return parts.filter(Boolean).join(" · ").slice(0, 400);
-}
-
 module.exports = { loadTranscript };
