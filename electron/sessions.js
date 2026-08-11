@@ -69,7 +69,7 @@ function titleFromSummary(summary) {
     "";
   if (t) return t;
   const id = summary?.info?.id || "";
-  return id ? id.slice(0, 8) : "(bez tytułu)";
+  return id ? id.slice(0, 8) : "(untitled)";
 }
 
 function kindFromSummary(summary) {
@@ -89,7 +89,7 @@ function scanSessions(options = {}) {
       grokHome,
       sessionsRoot,
       rows: [],
-      error: `Brak katalogu sesji: ${sessionsRoot}`,
+      error: `No sessions directory: ${sessionsRoot}`,
     };
   }
 
@@ -104,7 +104,7 @@ function scanSessions(options = {}) {
       grokHome,
       sessionsRoot,
       rows: [],
-      error: `Nie mogę czytać ${sessionsRoot}: ${err.message}`,
+      error: `Cannot read ${sessionsRoot}: ${err.message}`,
     };
   }
 
@@ -166,15 +166,15 @@ function scanSessions(options = {}) {
 
 function checkGrokBinary(grokPath) {
   const p = expandHome(grokPath);
-  if (!p) return { ok: false, path: p, reason: "Brak ścieżki do grok" };
+  if (!p) return { ok: false, path: p, reason: "No path to grok" };
   if (!fs.existsSync(p)) {
-    return { ok: false, path: p, reason: `Nie ma pliku: ${p}` };
+    return { ok: false, path: p, reason: `File not found: ${p}` };
   }
   try {
     fs.accessSync(p, fs.constants.X_OK);
     return { ok: true, path: p, reason: null };
   } catch {
-    return { ok: false, path: p, reason: `Brak prawa uruchomienia: ${p}` };
+    return { ok: false, path: p, reason: `Not executable: ${p}` };
   }
 }
 

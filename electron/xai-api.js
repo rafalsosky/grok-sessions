@@ -26,7 +26,7 @@ function apiRequest(
   const payload = body == null ? null : JSON.stringify(body);
   return new Promise((resolve, reject) => {
     if (signal && signal.aborted) {
-      reject(new Error("Przerwano"));
+      reject(new Error("Aborted"));
       return;
     }
     const req = https.request(
@@ -78,7 +78,7 @@ function apiRequest(
         "abort",
         () => {
           req.destroy();
-          reject(new Error("Przerwano"));
+          reject(new Error("Aborted"));
         },
         { once: true }
       );
@@ -105,7 +105,7 @@ function chatCompletionsStream(
   });
   return new Promise((resolve, reject) => {
     if (signal && signal.aborted) {
-      reject(new Error("Przerwano"));
+      reject(new Error("Aborted"));
       return;
     }
     const req = https.request(
@@ -180,7 +180,7 @@ function chatCompletionsStream(
         "abort",
         () => {
           req.destroy();
-          reject(new Error("Przerwano"));
+          reject(new Error("Aborted"));
         },
         { once: true }
       );
@@ -221,7 +221,7 @@ const BROWSER_UA =
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
     if (signal && signal.aborted) {
-      reject(new Error("Przerwano"));
+      reject(new Error("Aborted"));
       return;
     }
     const t = setTimeout(resolve, ms);
@@ -230,7 +230,7 @@ function sleep(ms, signal) {
         "abort",
         () => {
           clearTimeout(t);
-          reject(new Error("Przerwano"));
+          reject(new Error("Aborted"));
         },
         { once: true }
       );
@@ -254,13 +254,13 @@ async function downloadBuffer(url, { signal = null, tries = 3 } = {}) {
       }
       return { buf, mimeType: res.headers.get("content-type") || "" };
     } catch (err) {
-      if (signal && signal.aborted) throw new Error("Przerwano");
+      if (signal && signal.aborted) throw new Error("Aborted");
       lastErr = err;
       await sleep(1000 * (attempt + 1), signal);
     }
   }
   throw new Error(
-    `Nie udało się pobrać pliku (${lastErr ? lastErr.message : "brak szczegółów"}): ${url}`
+    `Nie udało się pobrać pliku (${lastErr ? lastErr.message : "no details"}): ${url}`
   );
 }
 

@@ -217,7 +217,7 @@ function loadBrowserCookieHeader(pythonPath) {
     cookieCache = {
       at: now,
       header: null,
-      error: "Nie znaleziono Pythona (patrz README)",
+      error: "Python not found (see README)",
     };
     return Promise.resolve(null);
   }
@@ -243,7 +243,7 @@ for browser in ("arc", "chrome", "chromium"):
         cookies = got
         break
 if not cookies:
-    print(json.dumps({"ok": False, "error": "Brak ciasteczek grok.com (zaloguj w Arc/Chrome)"}))
+    print(json.dumps({"ok": False, "error": "No grok.com cookies (sign in via Arc/Chrome)"}))
     sys.exit(0)
 picked = [c for c in cookies if c.get("name") in names]
 if not picked:
@@ -275,7 +275,7 @@ print(json.dumps({"ok": True, "header": header, "count": len(picked)}))
     });
 
   return (async () => {
-    let lastError = "Brak ciasteczek";
+    let lastError = "No cookies";
     for (const py of pythons) {
       const res = await runOne(py);
       if (res.ok) {
@@ -290,7 +290,7 @@ print(json.dumps({"ok": True, "header": header, "count": len(picked)}))
       at: Date.now(),
       header: null,
       error: /rookiepy|No module named/i.test(lastError)
-        ? "Żaden Python nie ma modułu rookiepy — zainstaluj: pip3 install rookiepy"
+        ? "No Python has the rookiepy module — install it: pip3 install rookiepy"
         : lastError,
     };
     return null;
@@ -488,7 +488,7 @@ function parseCreditsConfig(fields) {
     periodType: periodType || "weekly",
     periodStart: periodStart ? new Date(periodStart * 1000).toISOString() : null,
     resetsAt: resetsAt ? new Date(resetsAt * 1000).toISOString() : null,
-    windowLabel: periodType === "monthly" ? "miesiąc" : "tydzień",
+    windowLabel: periodType === "monthly" ? "month" : "week",
   };
 }
 
@@ -517,18 +517,18 @@ async function fetchWeeklyFromBrowser(cookieHeader) {
     timeout: 15000,
   });
   if (!res || !res.body || !res.body.length) {
-    return { weekly: null, error: "Pusta odpowiedź credits" };
+    return { weekly: null, error: "Empty credits response" };
   }
   const frames = parseGrpcWebFrames(res.body);
   const dataFrame = frames.find((f) => f.flags === 0);
   if (!dataFrame) {
-    return { weekly: null, error: "Brak ramki gRPC" };
+    return { weekly: null, error: "No gRPC frame" };
   }
   try {
     const fields = parseFields(dataFrame.payload);
     const weekly = parseCreditsConfig(fields);
     if (!weekly) {
-      return { weekly: null, error: "Nie udało się odczytać % z odpowiedzi" };
+      return { weekly: null, error: "Could not parse % from the response" };
     }
     return { weekly, error: null };
   } catch (err) {
@@ -603,7 +603,7 @@ async function fetchPlanUsage(token, opts = {}) {
       weeklyError =
         fromBrowser.error ||
         cookieCache.error ||
-        "Nie odczytano limitu z sesji przeglądarki";
+        "Could not read the limit from the browser session";
     }
   } else {
     // fallback: try OAuth rate-limits (usually blocked)
@@ -621,7 +621,7 @@ async function fetchPlanUsage(token, opts = {}) {
         const usedPct = Math.round(((total - rem) / total) * 100);
         weekly = {
           percent: usedPct,
-          label: "Build (okno 2 h)",
+          label: "Build (2 h window)",
           resetsAt: null,
           windowLabel: "2 h",
           periodType: "short",
@@ -632,15 +632,15 @@ async function fetchPlanUsage(token, opts = {}) {
       weeklyError =
         /oauth2/i.test(rlRes.json.message) ||
         /WKE=unauthorized/i.test(rlRes.json.message)
-          ? "xAI blokuje ten limit dla tokenów OAuth (oauth2-auth-forbidden). Jedyna droga to sesja przeglądarki: Ustawienia → „Czytaj ciasteczka grok.com”."
+          ? "xAI blocks this limit for OAuth tokens (oauth2-auth-forbidden). The only route is a browser session: Settings → „Read grok.com cookies”."
           : String(rlRes.json.message).slice(0, 160);
     } else if (!opts.readBrowserCookies) {
       weeklyError =
-        "Tygodniowy % wymaga sesji przeglądarki. Włącz w Ustawieniach: „Czytaj ciasteczka grok.com z Arc/Chrome”.";
+        "Weekly % needs a browser session. Enable it in Settings: „Read grok.com cookies from Arc/Chrome”.";
     } else {
       weeklyError =
         cookieCache.error ||
-        "Brak sesji przeglądarki (Arc/Chrome zalogowany na grok.com)";
+        "No browser session (Arc/Chrome signed in to grok.com)";
     }
   }
 

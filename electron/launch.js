@@ -24,7 +24,7 @@ function buildGrokCommand({ grokPath, cwd, mode, sessionId }) {
   }
   if (mode === "resume") {
     if (!UUID_RE.test(sessionId || "")) {
-      throw new Error("Nieprawidłowy session id (oczekiwany UUID)");
+      throw new Error("Invalid session id (UUID expected)");
     }
     return `cd ${shellQuote(workdir)} && ${shellQuote(bin)} --resume ${shellQuote(sessionId)} --cwd ${shellQuote(workdir)}`;
   }

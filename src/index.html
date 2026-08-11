@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="pl" data-theme="dark">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta
@@ -12,7 +12,7 @@
   </head>
   <body>
     <div id="drop-overlay" class="drop-overlay hidden">
-      <div class="drop-card">Upuść pliki, foldery lub grafiki</div>
+      <div class="drop-card" data-i18n="Drop files, folders or images">Drop files, folders or images</div>
     </div>
 
     <div id="app">
@@ -21,7 +21,7 @@
           <div class="brand-row no-drag">
             <div class="brand-mark" aria-hidden="true">✦</div>
             <span class="brand-word" title="SuperGrok Desktop SoskyApp">SuperGrok Desktop SoskyApp</span>
-            <button type="button" id="btn-collapse" class="icon-ghost" title="Zwiń">‹</button>
+            <button type="button" id="btn-collapse" class="icon-ghost" title="Collapse" data-i18n-title="Collapse">‹</button>
           </div>
           <div class="mode-tabs no-drag" role="tablist">
             <button type="button" class="mode-tab active" data-mode="home" id="tab-home">Home</button>
@@ -32,11 +32,11 @@
         <div class="rail-tools no-drag">
           <button type="button" id="btn-new" class="btn-new">
             <span class="ico">✎</span>
-            <span id="btn-new-label">New chat</span>
+            <span id="btn-new-label" data-i18n="New chat">New chat</span>
           </button>
           <div class="search-wrap">
             <span class="search-ico">⌕</span>
-            <input type="search" id="filter" placeholder="Search" autocomplete="off" spellcheck="false" />
+            <input type="search" id="filter" placeholder="Search" data-i18n-placeholder="Search" autocomplete="off" spellcheck="false" />
           </div>
         </div>
 
@@ -48,21 +48,21 @@
         </div>
 
         <footer class="rail-footer no-drag">
-          <button type="button" id="btn-account" class="account-btn" title="Konto">
+          <button type="button" id="btn-account" class="account-btn" title="Account" data-i18n-title="Account">
             <span class="avatar" id="account-avatar">R</span>
             <span class="account-meta">
               <span class="account-name" id="account-name">—</span>
-              <span class="account-sub" id="account-sub">konto</span>
+              <span class="account-sub" id="account-sub">account</span>
             </span>
           </button>
-          <button type="button" id="btn-settings" class="icon-ghost" title="Ustawienia">⚙</button>
+          <button type="button" id="btn-settings" class="icon-ghost" title="Settings" data-i18n-title="Settings">⚙</button>
         </footer>
       </aside>
 
       <section class="workspace">
         <header class="ws-header drag">
           <div class="ws-header-left no-drag">
-            <button type="button" id="btn-expand" class="icon-ghost expand-in-header hidden" title="Pokaż listę sesji">›</button>
+            <button type="button" id="btn-expand" class="icon-ghost expand-in-header hidden" title="Show session list" data-i18n-title="Show session list">›</button>
             <div class="ws-path" id="ws-path">
               <span id="ws-mode-badge" class="mode-badge">Home</span>
               <span id="ws-cwd">chat</span>
@@ -79,20 +79,20 @@
             <div class="hero-logo">✦</div>
             <h2 id="hero-title">How can I help you today?</h2>
             <p class="hero-sub" id="hero-sub">
-              Home = czat jak w przeglądarce Grok (tekst + grafiki). Przeciągnij pliki albo wklej screenshot.
+              Like Grok in the browser: chat and images. Drop files or paste a screenshot.
             </p>
             <div class="suggestions" id="suggestions">
-              <button type="button" class="suggest" data-text="Wygeneruj grafikę: minimalistyczne logo marki Sosky, ciemne tło, clay accent">
-                🎨 Wygeneruj grafikę
+              <button type="button" class="suggest" data-text="Generate an image: a minimal logo on a dark background" data-i18n="🎨 Generate an image">
+                🎨 Generate an image
               </button>
-              <button type="button" class="suggest" data-text="Wytłumacz prosto, czym różni się funnel od lejka sprzedażowego">
-                💬 Pytanie jak w przeglądarce
+              <button type="button" class="suggest" data-text="Explain in simple terms how a REST API differs from GraphQL" data-i18n="💬 Ask like in the browser">
+                💬 Ask like in the browser
               </button>
-              <button type="button" class="suggest" data-text="/image flat illustration of a Polish entrepreneur looking at Meta Ads dashboard">
+              <button type="button" class="suggest" data-text="/image flat illustration of a developer at a desk">
                 🖼️ /image …
               </button>
-              <button type="button" class="suggest" data-text="Zrób plan treści na 7 dni pod Meta Ads dla ekspertów">
-                📋 Plan treści
+              <button type="button" class="suggest" data-text="Draft a 7-day content plan for a small SaaS" data-i18n="📋 Content plan">
+                📋 Content plan
               </button>
             </div>
           </div>
@@ -102,19 +102,19 @@
         <div class="composer-dock no-drag">
           <div id="status-bar" class="status-bar hidden">
             <span class="status-dot busy"></span>
-            <span id="status-text">Working…</span>
-            <button type="button" id="btn-toggle-activity" class="linkish hidden">Pokaż kroki</button>
+            <span id="status-text" data-i18n="Working…">Working…</span>
+            <button type="button" id="btn-toggle-activity" class="linkish hidden" data-i18n="Show steps">Show steps</button>
           </div>
           <div id="activity-panel" class="activity-panel hidden"></div>
           <div id="toast" class="toast hidden"></div>
           <div id="attach-chips" class="attach-chips hidden"></div>
           <form id="composer" class="composer no-drag">
             <div class="composer-top">
-              <button type="button" class="icon-ghost attach" id="btn-attach" title="Dodaj plik / folder">＋</button>
+              <button type="button" class="icon-ghost attach" id="btn-attach" title="Add file / folder" data-i18n-title="Add file / folder">＋</button>
               <textarea
                 id="input"
                 rows="1"
-                placeholder="Message Grok… (Enter = send, ⌘V = wklej screenshot)"
+                placeholder="Message Grok… (Enter = send, ⌘V = paste screenshot)" data-i18n-placeholder="Message Grok… (Enter = send, ⌘V = paste screenshot)"
                 autocomplete="off"
                 spellcheck="true"
               ></textarea>
@@ -126,7 +126,7 @@
                 <button type="button" class="seg-btn" data-kind="video">Video</button>
               </div>
               <label class="model-pill hidden" id="ratio-wrap">
-                <select id="ratio-select" title="Proporcje">
+                <select id="ratio-select" title="Aspect ratio" data-i18n-title="Aspect ratio">
                   <option value="1:1">1:1</option>
                   <option value="16:9">16:9</option>
                   <option value="9:16">9:16</option>
@@ -137,15 +137,15 @@
             </div>
             <div class="composer-bottom">
               <div class="composer-left">
-                <button type="button" id="perm-mode-btn" class="chip mode-auto" title="Tryb uprawnień narzędzi. Kliknij, żeby przełączyć Auto / Pytaj.">
+                <button type="button" id="perm-mode-btn" class="chip mode-auto" title="Tool permission mode. Click to switch Auto / Ask." data-i18n-title="Tool permission mode. Click to switch Auto / Ask.">
                   Auto
                 </button>
-                <!-- Working chip usunięty — status = pasek „Myślę…” nad composerem -->
+                <!-- Working chip removed on purpose: status lives in the bar above the composer -->
                 <span id="busy-chip" class="chip busy hidden" hidden aria-hidden="true"></span>
                 <span id="cwd-chip" class="chip path">Home chat</span>
               </div>
               <div class="composer-right">
-                <label class="model-pill" id="effort-wrap" title="Głębokość myślenia (reasoning effort)">
+                <label class="model-pill" id="effort-wrap" title="Reasoning effort" data-i18n-title="Reasoning effort">
                   <select id="effort-select">
                     <option value="low">Low</option>
                     <option value="medium">Med</option>
@@ -161,16 +161,16 @@
               </div>
             </div>
           </form>
-          <p class="fine-print" id="fine-print">Home · czat i grafiki · przeciągnij pliki tutaj</p>
+          <p class="fine-print" id="fine-print">Home · chat and graphics · drop files here</p>
           <div class="usage-corner no-drag">
-            <button type="button" id="btn-usage" class="usage-btn" title="Zużycie kontekstu i limity">
+            <button type="button" id="btn-usage" class="usage-btn" title="Context and limits" data-i18n-title="Context and limits">
               <span id="usage-btn-pct">—</span>
               <span class="usage-btn-ring" id="usage-btn-ring" aria-hidden="true"></span>
             </button>
             <div id="usage-popover" class="usage-popover hidden" role="dialog" aria-label="Usage">
-              <div class="usage-pop-head">Zużycie</div>
+              <div class="usage-pop-head" data-i18n="Usage">Usage</div>
               <div class="usage-row">
-                <span class="usage-label" id="usage-weekly-label">Tygodniowy limit SuperGrok</span>
+                <span class="usage-label" id="usage-weekly-label" data-i18n="Weekly SuperGrok limit">Weekly SuperGrok limit</span>
                 <span class="usage-meta" id="usage-weekly-meta">—</span>
               </div>
               <div class="usage-bar-track"><div class="usage-bar-fill weekly" id="usage-weekly-bar"></div></div>
@@ -179,7 +179,7 @@
               </div>
               <div class="usage-sep"></div>
               <div class="usage-row">
-                <span class="usage-label">Context window (sesja)</span>
+                <span class="usage-label" data-i18n="Context window (session)">Context window (session)</span>
                 <span class="usage-meta" id="usage-ctx-meta">—</span>
               </div>
               <div class="usage-bar-track"><div class="usage-bar-fill" id="usage-ctx-bar"></div></div>
@@ -194,15 +194,15 @@
     </div>
 
     <div id="ctx-menu" class="ctx-menu hidden">
-      <button type="button" data-act="new">New chat</button>
-      <button type="button" data-act="rename">Rename</button>
-      <button type="button" data-act="unread">Mark unread</button>
-      <button type="button" data-act="read">Mark read</button>
-      <button type="button" data-act="pin">Pin / Unpin</button>
-      <button type="button" data-act="copy">Copy session ID</button>
-      <button type="button" data-act="reveal">Show in Finder</button>
+      <button type="button" data-act="new" data-i18n="New chat">New chat</button>
+      <button type="button" data-act="rename" data-i18n="Rename">Rename</button>
+      <button type="button" data-act="unread" data-i18n="Mark unread">Mark unread</button>
+      <button type="button" data-act="read" data-i18n="Mark read">Mark read</button>
+      <button type="button" data-act="pin" data-i18n="Pin / Unpin">Pin / Unpin</button>
+      <button type="button" data-act="copy" data-i18n="Copy session ID">Copy session ID</button>
+      <button type="button" data-act="reveal" data-i18n="Show in Finder">Show in Finder</button>
       <div class="ctx-sep"></div>
-      <button type="button" data-act="delete" class="danger">Delete chat</button>
+      <button type="button" data-act="delete" class="danger" data-i18n="Delete chat">Delete chat</button>
     </div>
 
     <div id="modal" class="modal hidden" role="dialog">
@@ -211,7 +211,7 @@
         <p id="modal-body"></p>
         <input type="text" id="modal-input" class="input hidden" />
         <div class="modal-actions">
-          <button type="button" id="modal-cancel" class="btn">Cancel</button>
+          <button type="button" id="modal-cancel" class="btn" data-i18n="Cancel">Cancel</button>
           <button type="button" id="modal-ok" class="btn primary">OK</button>
         </div>
       </div>
@@ -219,18 +219,18 @@
 
     <div id="account-modal" class="modal hidden" role="dialog">
       <div class="modal-card">
-        <h2>Konto</h2>
+        <h2 data-i18n="Account">Account</h2>
         <p id="account-detail" class="account-detail">—</p>
         <div class="modal-actions">
-          <button type="button" id="account-login" class="btn">Log in (grok login)</button>
-          <button type="button" id="account-close" class="btn primary">Zamknij</button>
+          <button type="button" id="account-login" class="btn" data-i18n="Log in">Log in</button>
+          <button type="button" id="account-close" class="btn primary" data-i18n="Close">Close</button>
         </div>
       </div>
     </div>
 
-    <div id="perm-modal" class="modal hidden" role="dialog" aria-label="Zgoda na narzędzie">
+    <div id="perm-modal" class="modal hidden" role="dialog" aria-label="Tool permission">
       <div class="modal-card">
-        <h2>Agent prosi o zgodę</h2>
+        <h2 data-i18n="The agent asks for permission">The agent asks for permission</h2>
         <p id="perm-tool" class="perm-tool">—</p>
         <pre id="perm-detail" class="perm-detail"></pre>
         <div class="modal-actions" id="perm-actions"></div>
@@ -239,73 +239,81 @@
 
     <div id="settings-modal" class="modal hidden" role="dialog">
       <div class="modal-card settings-card">
-        <h2>Settings</h2>
+        <h2 data-i18n="Settings">Settings</h2>
         <label class="field">
-          <span>Path to grok binary</span>
+          <span data-i18n="Path to grok binary">Path to grok binary</span>
           <div class="row">
             <input type="text" id="set-grok-path" class="input" />
-            <button type="button" id="set-pick-grok" class="btn">Browse…</button>
+            <button type="button" id="set-pick-grok" class="btn" data-i18n="Browse…">Browse…</button>
           </div>
         </label>
         <label class="field">
-          <span>Default working directory (Build)</span>
+          <span data-i18n="Default working directory (Build)">Default working directory (Build)</span>
           <input type="text" id="set-cwd" class="input" />
         </label>
         <label class="field check">
           <input type="checkbox" id="set-subagents" />
-          <span>Pokaż subagentów na liście Build</span>
+          <span data-i18n="Show subagents in Build list">Show subagents in Build list</span>
         </label>
 
         <label class="field check">
           <input type="checkbox" id="set-privacy" />
           <span>
-            Tryb prywatności — ukryj imię i e-mail w interfejsie.
-            Do zrzutów ekranu i nagrań. Skrót: ⌘⇧P.
+<span data-i18n="Privacy mode — hide name and e-mail in the interface. For screenshots and recordings. Shortcut: ⌘⇧P.">Privacy mode — hide name and e-mail in the interface. For screenshots and recordings. Shortcut: ⌘⇧P.</span>
           </span>
         </label>
 
         <label class="field">
-          <span>Motyw</span>
+          <span data-i18n="Language">Language</span>
+          <select id="set-language" class="input">
+            <option value="en">English</option>
+            <option value="pl">Polski</option>
+            <option value="auto" data-i18n="System language">System language</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span data-i18n="Theme">Theme</span>
           <select id="set-theme" class="input">
-            <option value="dark">Ciemny</option>
-            <option value="light">Jasny</option>
-            <option value="auto">Jak system</option>
+            <option value="dark" data-i18n="Dark">Dark</option>
+            <option value="light" data-i18n="Light">Light</option>
+            <option value="auto" data-i18n="Follow system">Follow system</option>
           </select>
         </label>
 
         <label class="field">
-          <span>Uprawnienia narzędzi agenta (Build)</span>
+          <span data-i18n="Agent tool permissions (Build)">Agent tool permissions (Build)</span>
           <select id="set-permission" class="input">
-            <option value="auto">Auto — agent działa bez pytania</option>
-            <option value="ask">Pytaj — zatwierdzam każde narzędzie</option>
+            <option value="auto" data-i18n="Auto — the agent works without asking">Auto — the agent works without asking</option>
+            <option value="ask" data-i18n="Ask — I approve every tool">Ask — I approve every tool</option>
           </select>
         </label>
 
         <label class="field">
-          <span>Maksymalna długość odpowiedzi w Home (tokeny)</span>
+          <span data-i18n="Maximum reply length in Home (tokens)">Maximum reply length in Home (tokens)</span>
           <input type="number" id="set-max-tokens" class="input" min="1024" max="32768" step="512" />
         </label>
 
         <label class="field check">
           <input type="checkbox" id="set-cookies" />
           <span>
-            Czytaj ciasteczka grok.com z Arc/Chrome (tygodniowy % zużycia).
-            Wymaga Pythona z modułem <code>rookiepy</code>. Domyślnie wyłączone.
+<span data-i18n="Read grok.com cookies from Arc/Chrome (weekly usage %). Requires Python with the rookiepy module. Off by default.">Read grok.com cookies from Arc/Chrome (weekly usage %). Requires Python with the rookiepy module. Off by default.</span>
           </span>
         </label>
         <label class="field" id="python-field">
-          <span>Ścieżka do Pythona z rookiepy (puste = szukaj w PATH)</span>
-          <input type="text" id="set-python" class="input" placeholder="np. /opt/homebrew/bin/python3" />
+          <span data-i18n="Path to Python with rookiepy (empty = search PATH)">Path to Python with rookiepy (empty = search PATH)</span>
+          <input type="text" id="set-python" class="input" placeholder="e.g. /opt/homebrew/bin/python3" />
         </label>
 
         <div class="modal-actions">
-          <button type="button" id="set-login" class="btn">Zaloguj</button>
-          <button type="button" id="set-cancel" class="btn">Anuluj</button>
-          <button type="button" id="set-save" class="btn primary">Zapisz</button>
+          <button type="button" id="set-login" class="btn" data-i18n="Log in">Log in</button>
+          <button type="button" id="set-cancel" class="btn" data-i18n="Cancel">Cancel</button>
+          <button type="button" id="set-save" class="btn primary" data-i18n="Save">Save</button>
         </div>
       </div>
     </div>
 
+    <script src="./i18n.js"></script>
     <script src="./markdown.js"></script>
     <script src="./app.js"></script>
   </body>

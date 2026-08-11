@@ -218,6 +218,8 @@ function buildListPayload() {
       pythonPath: settings.pythonPath || "",
       homeMaxTokens: settings.homeMaxTokens || 8192,
       privacyMode: Boolean(settings.privacyMode),
+      language: settings.language || "en",
+      systemLocale: app.getLocale(),
       // do maskowania ścieżek w trybie prywatności (/Users/ktoś → ~)
       homeDir: app.getPath("home"),
     },
@@ -306,7 +308,7 @@ function startWatchers() {
 async function ensureAcp() {
   const settings = getSettings();
   const bin = checkGrokBinary(settings.grokPath);
-  if (!bin.ok) throw new Error(bin.reason || "Brak grok");
+  if (!bin.ok) throw new Error(bin.reason || "grok binary not found");
 
   if (!acp) {
     acp = new AcpClient({
@@ -371,7 +373,7 @@ async function sendHomeChat({
 }) {
   const settings = getSettings();
   const token = xai.getAccessToken(settings.grokHome || resolveGrokHome());
-  if (!token) throw new Error("Brak tokenu xAI — zaloguj się (grok login)");
+  if (!token) throw new Error("No xAI token — sign in with: grok login");
   homeAbort = new AbortController();
   const signal = homeAbort.signal;
 
@@ -403,7 +405,7 @@ async function sendHomeChat({
     /wygeneruj wideo|generate video|zrób film/i.test(String(text || ""));
 
   if (wantVideo) {
-    status("generating_image", "Generuję wideo…");
+    status("generating_image", "Generating video…");
     const prompt = String(text || "")
       .replace(/^\/video\s+/i, "")
       .trim();
@@ -412,7 +414,7 @@ async function sendHomeChat({
       aspect_ratio: aspectRatio || "16:9",
       signal,
       onProgress: (p) =>
-        status("generating_image", `Generuję wideo… ${p}%`),
+        status("generating_image", `Generating video… ${p}%`),
     });
     // b64 NIE ląduje w wiadomości: plik ma kilka MB, a historia czatu
     // trzymana jest w JSON-ie. W UI odtwarzamy ze ścieżki.
@@ -442,7 +444,7 @@ async function sendHomeChat({
   }
 
   if (wantImage) {
-    status("generating_image", "Generuję grafikę…");
+    status("generating_image", "Generating image…");
     const prompt = xai.stripImageCommand(text) || text;
     const img = await xai.generateImage(token, {
       prompt,
@@ -481,7 +483,7 @@ async function sendHomeChat({
     };
   }
 
-  status("thinking", "Myślę…");
+  status("thinking", "Thinking…");
   const model = modelId || settings.homeModelId || "grok-4.5";
 
   // Build OpenAI-style messages from history.
@@ -501,7 +503,7 @@ async function sendHomeChat({
       let content = m.content || "";
       if (m.attachments && m.attachments.length) {
         content +=
-          "\n\n[Załączniki: " +
+          "\n\n[Attachments: " +
           m.attachments.map((a) => a.name || a.path).join(", ") +
           "]";
       }
@@ -534,7 +536,7 @@ async function sendHomeChat({
     }
   });
 
-  status("responding", "Piszę odpowiedź…");
+  status("responding", "Writing…");
   // Streaming: tekst leci do UI na bieżąco, jak w Build.
   let reply = "";
   try {
@@ -557,7 +559,7 @@ async function sendHomeChat({
       }
     );
   } catch (err) {
-    if (signal.aborted) throw new Error("Przerwano");
+    if (signal.aborted) throw new Error("Stopped");
     // Awaryjnie bez streamu (np. gdy endpoint nie wspiera SSE)
     const res = await xai.chatCompletions(token, {
       model: model.includes("imagine") ? "grok-4.5" : model,
@@ -591,19 +593,19 @@ async function sendHomeChat({
 }
 
 async function sendCodeChat({ text, sessionId, cwd, attachments }) {
-  status("starting", "Uruchamiam agenta…");
+  status("starting", "Starting agent…");
   const client = await ensureAcp();
   const settings = getSettings();
   const workCwd = expandHome(cwd || settings.defaultCwd);
 
   let sid = sessionId;
   if (!sid) {
-    status("session", "Nowa sesja Code…");
+    status("session", "New Build session…");
     client.sessionId = null;
     const created = await client.ensureSession({ cwd: workCwd });
     sid = created.sessionId;
   } else {
-    status("session", "Ładuję sesję…");
+    status("session", "Loading session…");
     await client.ensureSession({ sessionId: sid, cwd: workCwd });
   }
 
@@ -612,7 +614,7 @@ async function sendCodeChat({ text, sessionId, cwd, attachments }) {
   // NIE wysyłaj user_message_chunk do UI — renderer już dodał bańkę lokalnie.
   // Echo stąd + echo z ACP = podwójna wiadomość i skok scrolla.
 
-  status("thinking", "Agent pracuje…");
+  status("thinking", "Agent is working…");
   // Do agenta: tekst + ścieżki załączników
   const result = await client.prompt(promptText, {
     sessionId: sid,
@@ -712,7 +714,7 @@ function registerIpc() {
         showSubagents: true,
       });
       const row = scan.rows.find((r) => r.id === id);
-      if (!row) return { messages: [], error: "Sesja nie znaleziona" };
+      if (!row) return { messages: [], error: "Session not found" };
       return loadTranscript(row.dirPath);
     }
     return loadTranscript(dirPath);
@@ -737,7 +739,7 @@ function registerIpc() {
       return { ok: true, sessionId: id, mode: "home", title: chat.title };
     }
     if (!UUID_RE.test(id || "")) {
-      return { ok: false, error: "Zły session id" };
+      return { ok: false, error: "Bad session id" };
     }
     try {
       const client = await ensureAcp();
@@ -766,14 +768,14 @@ function registerIpc() {
     const hasText = text && String(text).trim();
     const hasAtt = attachments && attachments.length;
     if (!hasText && !hasAtt) {
-      return { ok: false, error: "Pusta wiadomość" };
+      return { ok: false, error: "Empty message" };
     }
     const lane = mode === "home" ? "home" : "grok";
     if (promptBusy[lane]) {
       return {
         ok: false,
         error:
-          lane === "home" ? "Home jeszcze odpowiada" : "Agent jeszcze pracuje",
+          lane === "home" ? "Home is still answering" : "Agent is still working",
       };
     }
 
@@ -783,12 +785,12 @@ function registerIpc() {
       sessionId: sessionId || null,
       mode: mode || "home",
     });
-    status("queued", "Start…");
+    status("queued", "Starting…");
     try {
       let out;
       if (mode === "home") {
         out = await sendHomeChat({
-          text: hasText ? String(text) : "(załącznik)",
+          text: hasText ? String(text) : "(attachment)",
           sessionId,
           attachments: attachments || [],
           modelId,
@@ -803,7 +805,7 @@ function registerIpc() {
           saveSettings(userDataDir(), { effort });
         }
         out = await sendCodeChat({
-          text: hasText ? String(text) : "Przeanalizuj załączniki.",
+          text: hasText ? String(text) : "Analyze the attachments.",
           sessionId,
           cwd,
           attachments: attachments || [],
@@ -818,7 +820,7 @@ function registerIpc() {
         }
       }
       pushSessions();
-      status("done", "Gotowe");
+      status("done", "Done");
       return out;
     } catch (err) {
       status("error", err.message);
@@ -832,7 +834,7 @@ function registerIpc() {
 
   ipcMain.handle("chat:permission-reply", async (_e, payload) => {
     const { id, optionId } = payload || {};
-    if (id == null || !acp) return { ok: false, error: "Brak agenta" };
+    if (id == null || !acp) return { ok: false, error: "No agent" };
     const ok = acp.respondPermission(id, optionId || null);
     pendingPermissions.delete(id);
     return { ok };
@@ -887,7 +889,7 @@ function registerIpc() {
       homeAbort = null;
       promptBusy.home = false;
       send("chat:busy", { busy: false, mode: "home" });
-      status("stopped", "Przerwano");
+      status("stopped", "Stopped");
       if (mode === "home") return { ok: true, stopped: had, mode: "home" };
     }
 
@@ -902,7 +904,7 @@ function registerIpc() {
       acp = null;
       promptBusy.grok = false;
       send("chat:busy", { busy: false, mode: "grok" });
-      status("stopped", "Przerwano");
+      status("stopped", "Stopped");
       ensureAcp().catch(() => {});
       return { ok: true, stopped: true, sessionId: sid };
     } catch (err) {
@@ -953,7 +955,7 @@ function registerIpc() {
       return { ok: true };
     }
     if (!UUID_RE.test(id || "")) {
-      return { ok: false, error: "Nieprawidłowy session id" };
+      return { ok: false, error: "Invalid session id" };
     }
     const settings = getSettings();
     const bin = checkGrokBinary(settings.grokPath);
@@ -978,7 +980,7 @@ function registerIpc() {
 
   ipcMain.handle("session:reveal", async (_e, dirPath) => {
     if (!dirPath || !fs.existsSync(dirPath)) {
-      return { ok: false, error: "Katalog sesji nie istnieje" };
+      return { ok: false, error: "Session directory does not exist" };
     }
     shell.showItemInFolder(dirPath);
     return { ok: true };
@@ -998,7 +1000,7 @@ function registerIpc() {
 
   ipcMain.handle("app:pickGrokBinary", async () => {
     const res = await dialog.showOpenDialog(mainWindow, {
-      title: "Wskaż binarkę grok",
+      title: "Select the grok binary",
       properties: ["openFile"],
       defaultPath: getSettings().grokPath,
     });
@@ -1008,7 +1010,7 @@ function registerIpc() {
 
   ipcMain.handle("app:pickFiles", async () => {
     const res = await dialog.showOpenDialog(mainWindow, {
-      title: "Dodaj pliki / foldery",
+      title: "Add files / folders",
       properties: ["openFile", "openDirectory", "multiSelections"],
     });
     if (res.canceled) return [];

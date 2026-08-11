@@ -152,6 +152,70 @@ group("wideo: CSP, historia, źródło pliku");
   });
 }
 
+/* ── 2c. Język ────────────────────────────────────────────────────────
+   Interfejs był polsko-angielską hybrydą. Angielski jest teraz bazą,
+   polski nakładką. Te testy pilnują, żeby nie rozjechało się z powrotem. */
+group("i18n: angielski bazowy, polski kompletny");
+{
+  const i18n = require("../src/i18n.js");
+  const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(ROOT, "src", "index.html"), "utf8");
+
+  test("brak tłumaczenia = tekst angielski, nie pustka", () => {
+    i18n.setLang("pl");
+    assert.strictEqual(i18n.t("Totally unknown string"), "Totally unknown string");
+    i18n.setLang("en");
+  });
+
+  test("angielski nie rusza tekstu", () => {
+    i18n.setLang("en");
+    assert.strictEqual(i18n.t("Send"), "Send");
+  });
+
+  test("polski tłumaczy", () => {
+    i18n.setLang("pl");
+    assert.strictEqual(i18n.t("Send"), "Wyślij");
+    i18n.setLang("en");
+  });
+
+  test("„auto” bierze język systemu, reszta wprost", () => {
+    assert.strictEqual(i18n.resolveLang("auto", "pl-PL"), "pl");
+    assert.strictEqual(i18n.resolveLang("auto", "de-DE"), "en", "nieznany → angielski");
+    assert.strictEqual(i18n.resolveLang("en", "pl-PL"), "en", "wybór użytkownika ma pierwszeństwo");
+  });
+
+  // Najważniejszy: każdy tekst użyty w kodzie musi mieć polski odpowiednik,
+  // inaczej po przełączeniu na PL interfejs jest w połowie angielski.
+  const used = new Set();
+  for (const m of app.matchAll(/\btr\("((?:[^"\\]|\\.)*)"\)/g)) {
+    used.add(m[1].replace(/\\"/g, '"').replace(/\\\\/g, "\\"));
+  }
+  for (const m of html.matchAll(/data-i18n(?:-placeholder|-title)?="([^"]+)"/g)) {
+    used.add(m[1]);
+  }
+  test(`wszystkie teksty UI mają tłumaczenie PL (${used.size} szt.)`, () => {
+    const brak = [...used].filter((k) => !(k in i18n.PL));
+    assert.strictEqual(
+      brak.length,
+      0,
+      "brak w słowniku PL:\n       " + brak.slice(0, 12).join("\n       ")
+    );
+  });
+
+  test("w kodzie UI nie ma polskich literałów", () => {
+    const zle = [];
+    for (const [plik, src] of [
+      ["src/app.js", app],
+      ["src/index.html", html],
+    ]) {
+      // stringi i widoczne teksty z polskimi znakami = niezlokalizowane
+      const hits = src.match(/"[^"\n]*[ąćęłńóśźżĄĆĘŁŃÓŚŹŻ][^"\n]*"/g) || [];
+      for (const h of hits) if (!h.startsWith('"t(')) zle.push(`${plik}: ${h}`);
+    }
+    assert.strictEqual(zle.length, 0, zle.slice(0, 8).join("\n       "));
+  });
+}
+
 /* ── 3. Ustawienia ────────────────────────────────────────────────────
    Nowe pola: tryb uprawnień, opt-in na ciasteczka, limit tokenów. */
 group("settings: walidacja i wartości domyślne");

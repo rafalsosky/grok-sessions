@@ -32,7 +32,11 @@ const DEFAULTS = {
   homeMaxTokens: 8192,
   /** Ukryj imię i e-mail w interfejsie (zrzuty ekranu, nagrania) */
   privacyMode: false,
+  /** "en" | "pl" | "auto" (język systemu). Domyślnie angielski. */
+  language: "en",
 };
+
+const LANGS = ["en", "pl", "auto"];
 
 const PERMISSION_MODES = ["auto", "ask"];
 
@@ -78,6 +82,7 @@ function loadSettings(userDataDir) {
   }
   merged.readBrowserCookies = Boolean(merged.readBrowserCookies);
   merged.privacyMode = Boolean(merged.privacyMode);
+  if (!LANGS.includes(merged.language)) merged.language = "en";
   merged.pythonPath = merged.pythonPath ? expandHome(merged.pythonPath) : "";
   merged.homeMaxTokens = clampTokens(merged.homeMaxTokens);
   merged.grokHome = grokHome;
@@ -115,6 +120,7 @@ function saveSettings(userDataDir, partial) {
     pythonPath: next.pythonPath || "",
     homeMaxTokens: clampTokens(next.homeMaxTokens),
     privacyMode: Boolean(next.privacyMode),
+    language: LANGS.includes(next.language) ? next.language : "en",
   };
   fs.mkdirSync(userDataDir, { recursive: true });
   fs.writeFileSync(

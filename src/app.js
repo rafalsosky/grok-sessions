@@ -1,10 +1,21 @@
 /* global grokSessions, renderMarkdown */
 
 (() => {
+  /**
+   * tr() zamiast t(): w tym pliku „t” jest zajęte przez zmienne pętli po
+   * narzędziach. Brak i18n = angielski, czyli tekst źródłowy.
+   */
+  const tr = (window.tr || ((s) => s));
+  const i18n = window.i18n || {
+    setLang: () => "en",
+    resolveLang: () => "en",
+    applyDomTranslations: () => {},
+  };
+
   const api = window.grokSessions;
   if (!api) {
     document.body.innerHTML =
-      "<p style='padding:24px;color:#fff'>Brak bridge API (preload).</p>";
+      "<p style='padding:24px;color:#fff'>Missing bridge API (preload).</p>";
     return;
   }
 
@@ -228,7 +239,7 @@
    */
   function humanizeToolTitle(raw) {
     const s = String(raw || "").trim();
-    if (!s) return "Narzędzie";
+    if (!s) return tr("Tool");
     // Read `/path…` / Write / Edit — nigdy surowa ścieżka w statusie
     if (/^(read|write|edit|search|grep|bash|execute)\b/i.test(s) || s.length > 48) {
       const low = s.toLowerCase();
@@ -236,12 +247,12 @@
         return "Terminal";
       if (/^read\b|\bread_file\b|\bcat\b|\bhead\b|\btail\b/.test(low))
         return "Czytam plik";
-      if (/\b(write|edit|patch|search_replace|sed)\b/.test(low)) return "Edytuję plik";
+      if (/\b(write|edit|patch|search_replace|sed)\b/.test(low)) return tr("Editing file");
       if (/\b(grep|rg|find|search_tool|web_search)\b/.test(low)) return "Szukam";
-      if (/\b(web_search|browse|http|open_page)\b/.test(low)) return "Sieć";
+      if (/\b(web_search|browse|http|open_page)\b/.test(low)) return tr("Network");
       if (/^Execute\b/i.test(s)) return "Terminal";
       if (/\/|\\/.test(s)) return "Plik";
-      return "Narzędzie";
+      return tr("Tool");
     }
     if (/^\/Users\//.test(s) || /^[A-Za-z]:\\/.test(s)) return "Plik";
     const one = s.replace(/\s+/g, " ").slice(0, 40);
@@ -261,7 +272,7 @@
 
   function paintStatusText() {
     if (!el.statusText) return;
-    const base = lastStatusLabel || "Myślę…";
+    const base = lastStatusLabel || tr("Thinking…");
     el.statusText.textContent = turnStartedAt
       ? `${base} · ${fmtElapsed(Date.now() - turnStartedAt)}`
       : base;
@@ -325,8 +336,8 @@
     let safeDetail = detail || "";
     if (phase === "tool" || /^Execute\b/i.test(safeDetail) || safeDetail.length > 100) {
       safeDetail = humanizeToolTitle(safeDetail);
-      if (phase === "tool" && (!safeDetail || safeDetail === "Narzędzie")) {
-        safeDetail = "Pracuję w tle…";
+      if (phase === "tool" && (!safeDetail || safeDetail === tr("Tool"))) {
+        safeDetail = tr("Working in the background…");
       }
     }
     b.statusPhase = phase || "";
@@ -337,19 +348,19 @@
     const map = {
       queued: "Start…",
       starting: "Uruchamiam agenta…",
-      session: "Ładuję sesję…",
-      thinking: "Myślę…",
-      generating_image: "Generuję grafikę…",
-      responding: "Piszę…",
-      tool: "Pracuję w tle…",
+      session: tr("Loading session…"),
+      thinking: tr("Thinking…"),
+      generating_image: tr("Generating image…"),
+      responding: tr("Writing…"),
+      tool: tr("Working in the background…"),
       done: "Gotowe",
       stopped: "Przerwano",
-      error: "Błąd",
+      error: tr("Error"),
     };
     // Dla tool/thinking: preferuj krótką etykietę, nie surowy detail z ACP
     let label;
     if (phase === "tool") {
-      label = safeDetail && safeDetail !== "Narzędzie" ? safeDetail : map.tool;
+      label = safeDetail && safeDetail !== tr("Tool") ? safeDetail : map.tool;
     } else if (phase === "thinking" || phase === "responding") {
       label = map[phase] || safeDetail;
     } else {
@@ -357,7 +368,7 @@
     }
     // Ostateczna blokada: nigdy nie wklejaj Execute / ścieżek w status
     if (/^Execute\b/i.test(label) || /GROK_SESSIONS_ATTACHMENTS/i.test(label)) {
-      label = map[phase] || "Pracuję…";
+      label = map[phase] || tr("Working…");
     }
     if (label.length > 60) label = humanizeToolTitle(label);
 
@@ -365,7 +376,7 @@
       if (!busy) {
         el.statusBar.classList.add("hidden");
       } else {
-        lastStatusLabel = label || "Myślę…";
+        lastStatusLabel = label || tr("Thinking…");
         paintStatusText();
         el.statusBar.classList.remove("hidden");
       }
@@ -406,12 +417,12 @@
     if (done.length) {
       const h = document.createElement("div");
       h.className = "activity-group";
-      h.textContent = `Ukończone (${done.length}) — zwinięte domyślnie`;
+      h.textContent = `${tr("Completed")} (${done.length}) — ${tr("collapsed by default")}`;
       el.activityPanel.appendChild(h);
       const det = document.createElement("details");
       det.className = "activity-done";
       const sum = document.createElement("summary");
-      sum.textContent = `Pokaż ${done.length} completed`;
+      sum.textContent = `${tr("Show")} ${done.length} ${tr("completed")}`;
       det.appendChild(sum);
       for (const t of done) {
         const row = document.createElement("div");
@@ -438,14 +449,14 @@
       mode === "home" ? "Recents · Home" : "Recents · Build";
     el.finePrint.textContent =
       mode === "home"
-        ? "Home · czat i grafiki (/image …) · przeciągnij pliki lub wklej screenshot"
-        : "Build · agent z narzędziami · załączniki jako ścieżki na dysku";
+        ? tr("Home · chat and graphics (/image …) · drop files or paste a screenshot")
+        : tr("Build · agent with tools · attachments as paths on disk");
     document.getElementById("hero-title").textContent =
       mode === "home" ? "How can I help you today?" : "What should we build?";
     document.getElementById("hero-sub").textContent =
       mode === "home"
-        ? "Jak Grok w przeglądarce: rozmowa, pomysły, /image do grafik. Nie agent kodujący."
-        : "Build: pliki, shell, edycje. Załączniki idą do agenta jako ścieżki.";
+        ? tr("Like Grok in the browser: chat, ideas, /image for graphics. Not a coding agent.")
+        : tr("Build: files, shell, edits. Attachments go to the agent as paths.");
 
     el.wsTitle.textContent = bag().wsTitle || "New chat";
     updatePathChips(mode === "home" ? "" : selectedRow()?.cwd || defaultCwd);
@@ -555,7 +566,7 @@
       li.className = "session-item";
       li.style.cursor = "default";
       li.innerHTML = `<div><div class="title" style="color:var(--faint)">${
-        mode === "home" ? "Brak czatów Home — napisz poniżej" : "Brak sesji Build"
+        mode === "home" ? tr("No Home chats yet — write below") : "Brak sesji Build"
       }</div></div>`;
       el.list.appendChild(li);
       return;
@@ -891,7 +902,7 @@
           active.length > 1 ? ` +${active.length - 1}` : ""
         }`;
       } else {
-        pill.textContent = `${done.length} kroków w tle (ukryte) · patrz „Kroki”`;
+        pill.textContent = `${done.length} ${tr("background steps (hidden) · see „Steps”")}`;
       }
       body.appendChild(pill);
     }
@@ -970,8 +981,8 @@
       const inject = document.createElement("button");
       inject.type = "button";
       inject.className = "queued-inject";
-      inject.title = "Wyślij teraz — przerwij i dołącz do bieżącej roboty (↩)";
-      inject.textContent = "↩ Wyślij teraz";
+      inject.title = tr("Send now — interrupt and fold into current work");
+      inject.textContent = tr("↩ Send now");
       inject.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1007,7 +1018,7 @@
       return b;
     };
 
-    mkBtn("Copy", "Skopiuj treść wiadomości", async () => {
+    mkBtn("Copy", tr("Copy message text"), async () => {
       try {
         const clean =
           m.role === "user"
@@ -1016,27 +1027,27 @@
         await navigator.clipboard.writeText(clean || m.text || "");
         showToast("Skopiowane", "ok");
       } catch {
-        showToast("Nie udało się skopiować", "error");
+        showToast(tr("Copy failed"), "error");
       }
     });
 
     if (!m._queued) {
       if (m.role === "user") {
-        mkBtn("Edytuj", "Wróć do tej wiadomości i wyślij poprawioną", () =>
+        mkBtn("Edytuj", tr("Go back to this message and send a corrected version"), () =>
           editMessage(m)
         );
       }
       mkBtn(
-        "Ponów",
+        tr("Retry"),
         m.role === "user"
-          ? "Wyślij tę wiadomość jeszcze raz"
-          : "Wygeneruj odpowiedź jeszcze raz",
+          ? tr("Send this message again")
+          : tr("Generate the answer again"),
         () => retryFrom(m)
       );
       mkBtn(
-        "Usuń",
+        tr("Delete"),
         mode === "grok"
-          ? "Usuwa z widoku. Agent nadal pamięta tę turę w swojej sesji."
+          ? tr("Removes from view. The agent still remembers this turn in its session.")
           : "Usuwa z widoku czatu",
         () => deleteMessage(m)
       );
@@ -1206,6 +1217,7 @@
   let privacyMode = false;
   let lastAccount = null;
   let homeDirPath = "";
+  let lastSystemLocale = "en";
 
   function applyAccount(account) {
     if (account) lastAccount = account;
@@ -1217,8 +1229,8 @@
       el.accountSub.textContent = acc.loggedIn ? "konto ukryte" : "—";
       el.accountAvatar.textContent = "•";
       el.accountDetail.textContent = acc.loggedIn
-        ? "Dane konta ukryte (tryb prywatności)"
-        : "Nie zalogowano. Użyj „Zaloguj”.";
+        ? tr("Account details hidden (privacy mode)")
+        : tr("Not signed in. Use „Log in”.");
       return;
     }
 
@@ -1232,7 +1244,25 @@
       .toUpperCase();
     el.accountDetail.textContent = acc.loggedIn
       ? `${acc.name || ""}\n${acc.email || ""}\nSesja SuperGrok / xAI`
-      : "Nie zalogowano. Użyj „Zaloguj”.";
+      : tr("Not signed in. Use „Log in”.");
+  }
+
+  /**
+   * Ustawia język i odświeża wszystko, co już jest na ekranie.
+   * Domyślnie angielski — „auto” trzeba wybrać świadomie.
+   */
+  function applyLanguage(setting, systemLocale) {
+    const lang = i18n.resolveLang(setting || "en", systemLocale);
+    i18n.setLang(lang);
+    document.documentElement.setAttribute("lang", lang);
+    i18n.applyDomTranslations(document);
+    // teksty budowane w JS (zależne od trybu) trzeba przemalować ręcznie
+    if (bootDone) {
+      setMode(mode, { restoreSession: false });
+      renderList();
+      renderMessages({ force: true });
+      renderActivity();
+    }
   }
 
   function setPrivacyMode(on) {
@@ -1273,6 +1303,7 @@
     homeRows = payload.homeRows || [];
     defaultCwd = payload.settings?.defaultCwd || defaultCwd;
     homeDirPath = payload.settings?.homeDir || homeDirPath;
+    lastSystemLocale = payload.settings?.systemLocale || lastSystemLocale;
     homeModelId = payload.settings?.homeModelId || homeModelId;
     codeModelId = payload.settings?.modelId || codeModelId;
     // busy tylko na jednej sesji Build
@@ -1544,8 +1575,8 @@
     pushBag();
     showToast(
       mode === "grok"
-        ? "Usunięte z widoku (agent nadal to pamięta)"
-        : "Usunięte z widoku",
+        ? tr("Removed from view (the agent still remembers it)")
+        : tr("Removed from view"),
       ""
     );
   }
@@ -1553,7 +1584,7 @@
   /** Wstaw treść do composera i odetnij historię od tego miejsca (widok). */
   function editMessage(m) {
     if (busy) {
-      showToast("Najpierw zatrzymaj bieżącą turę (■)", "");
+      showToast(tr("Stop the current turn first (■)"), "");
       return;
     }
     const i = indexOfMsg(m);
@@ -1567,8 +1598,8 @@
     el.input.focus();
     showToast(
       mode === "grok"
-        ? "Popraw i wyślij. Uwaga: agent pamięta poprzednią wersję."
-        : "Popraw i wyślij",
+        ? tr("Edit and send. Note: the agent remembers the previous version.")
+        : tr("Edit and send"),
       "ok"
     );
   }
@@ -1576,14 +1607,14 @@
   /** Wyślij ponownie: z bańki usera tę samą, z bańki asystenta poprzedni prompt. */
   async function retryFrom(m) {
     if (busy) {
-      showToast("Najpierw zatrzymaj bieżącą turę (■)", "");
+      showToast(tr("Stop the current turn first (■)"), "");
       return;
     }
     const i = indexOfMsg(m);
     if (i < 0) return;
     const src = m.role === "user" ? m : lastUserBefore(i);
     if (!src) {
-      showToast("Nie ma czego ponowić", "error");
+      showToast(tr("Nothing to retry"), "error");
       return;
     }
     const text = cleanUserText(src.text || "");
@@ -1594,7 +1625,7 @@
     allMessages = allMessages.slice(0, from);
     syncVisibleMessages();
     renderMessages({ force: true });
-    await runSendTurn(text || "(załącznik)", atts, false);
+    await runSendTurn(text || tr("(attachment)"), atts, false);
   }
 
   function modalPrompt({ title, body, okLabel = "OK", inputValue = null }) {
@@ -1763,11 +1794,11 @@
       a.text += chunk;
       a.text = cleanAssistantText(a.text);
       buf.statusPhase = "responding";
-      buf.statusDetail = "Piszę…";
+      buf.statusDetail = tr("Writing…");
     } else if (kind === "agent_thought_chunk") {
       ensure().thinking += (update.content && update.content.text) || "";
       buf.statusPhase = "thinking";
-      buf.statusDetail = "Myślę…";
+      buf.statusDetail = tr("Thinking…");
     } else if (kind === "tool_call") {
       const a = ensure();
       const tool = {
@@ -1813,7 +1844,7 @@
       if (!chunk) return;
       const a = ensureStreamingAssistant();
       a.text += chunk;
-      setStatus("responding", "Piszę…", "home", { sessionId: sid });
+      setStatus("responding", tr("Writing…"), "home", { sessionId: sid });
       if (!handleChatUpdate._raf) {
         handleChatUpdate._raf = requestAnimationFrame(() => {
           handleChatUpdate._raf = null;
@@ -1844,7 +1875,7 @@
       const chunk = (update.content && update.content.text) || "";
       if (isAttachmentJunkOnly(chunk)) return;
       if (isToolEchoText(chunk)) {
-        setStatus("tool", "Pracuję w tle…", "grok", { sessionId: sid });
+        setStatus("tool", tr("Working in the background…"), "grok", { sessionId: sid });
         if (streamingAssistant) {
           streamingAssistant.text = cleanAssistantText(streamingAssistant.text);
           patchLastAssistantBubble(streamingAssistant);
@@ -1856,10 +1887,10 @@
       a.text += chunk;
       a.text = cleanAssistantText(a.text);
       if (!a.text.trim()) {
-        setStatus("tool", "Pracuję w tle…", "grok", { sessionId: sid });
+        setStatus("tool", tr("Working in the background…"), "grok", { sessionId: sid });
         return;
       }
-      setStatus("responding", "Piszę…", "grok", { sessionId: sid });
+      setStatus("responding", tr("Writing…"), "grok", { sessionId: sid });
       if (!handleChatUpdate._raf) {
         handleChatUpdate._raf = requestAnimationFrame(() => {
           handleChatUpdate._raf = null;
@@ -1873,7 +1904,7 @@
     if (kind === "agent_thought_chunk") {
       const a = ensureStreamingAssistant();
       a.thinking += (update.content && update.content.text) || "";
-      setStatus("thinking", "Myślę…", "grok", { sessionId: sid });
+      setStatus("thinking", tr("Thinking…"), "grok", { sessionId: sid });
       if (sid) snapshotCurrentBuildSession();
       return;
     }
@@ -1936,9 +1967,9 @@
       (t) => t.status === "completed" || t.status === "failed"
     );
     const label = active.length
-      ? `Pracuję: ${humanizeToolTitle(active[0].title)}${active.length > 1 ? ` +${active.length - 1}` : ""}`
+      ? `${tr("Working")}: ${humanizeToolTitle(active[0].title)}${active.length > 1 ? ` +${active.length - 1}` : ""}`
       : done.length
-        ? `${done.length} kroków w tle · „Kroki”`
+        ? `${done.length} ${tr("background steps · „Steps”")}`
         : m.thinking
           ? "Thinking…"
           : "";
@@ -1985,7 +2016,7 @@
     } else if (kind === "agent_thought_chunk") {
       ensure().thinking += (update.content && update.content.text) || "";
       b.statusPhase = "thinking";
-      b.statusDetail = "Myślę…";
+      b.statusDetail = tr("Thinking…");
     } else if (kind === "tool_call") {
       const a = ensure();
       const tool = {
@@ -2037,7 +2068,7 @@
     el.btnSend.classList.remove("hidden");
     el.btnSend.title = busy
       ? viewingBusySession
-        ? "Dodaj do kolejki (wyśle po odpowiedzi)"
+        ? tr("Add to queue (sends after the reply)")
         : "Agent w innej sesji Build — Enter doda do kolejki"
       : "Send";
     el.btnSend.classList.toggle("queue-mode", busy);
@@ -2056,7 +2087,7 @@
       if (el.statusBar.classList.contains("hidden")) {
         const d = bag().statusDetail;
         const p = bag().statusPhase;
-        lastStatusLabel = d || (p === "tool" ? "Pracuję…" : "Myślę…");
+        lastStatusLabel = d || (p === "tool" ? tr("Working…") : tr("Thinking…"));
         paintStatusText();
         el.statusBar.classList.remove("hidden");
       }
@@ -2272,7 +2303,7 @@
       kind: (file.type || "").startsWith("image/") ? "image" : "file",
     });
     if (!res.ok) {
-      showToast(res.error || "Nie udało się dodać pliku", "error");
+      showToast(res.error || tr("Attach failed"), "error");
       return;
     }
     attachments.push(res);
@@ -2282,7 +2313,7 @@
   async function addAttachmentFromPath(p) {
     const res = await api.importAttachmentPath(p);
     if (!res.ok) {
-      showToast(res.error || "Nie udało się zaimportować", "error");
+      showToast(res.error || tr("Import failed"), "error");
       return;
     }
     attachments.push(res);
@@ -2297,14 +2328,14 @@
 
     // Agent busy → kolejka. Dopowiedzenie = doklej do tej samej pozycji (nie nowa tura).
     if (busy) {
-      const piece = text || "(załącznik)";
+      const piece = text || tr("(attachment)");
       const lastQ = messageQueue[messageQueue.length - 1];
       const lastMsg = lastAll();
       if (lastQ && (!atts.length || !(lastQ.attachments || []).length)) {
         // scal tekst + ewent. załączniki
-        if (piece && piece !== "(załącznik)") {
+        if (piece && piece !== tr("(attachment)")) {
           lastQ.text =
-            lastQ.text && lastQ.text !== "(załącznik)"
+            lastQ.text && lastQ.text !== tr("(attachment)")
               ? `${lastQ.text}\n${piece}`
               : piece;
         }
@@ -2315,7 +2346,7 @@
           lastMsg.text = lastQ.text;
           lastMsg.attachments = lastQ.attachments || [];
         }
-        showToast("Doklejone do kolejki (1 wiadomość)", "ok");
+        showToast(tr("Appended to the queued message"), "ok");
       } else {
         messageQueue.push({ text: piece, attachments: atts });
         pushAll({
@@ -2338,13 +2369,13 @@
       updateQueueChip();
       setStatus(
         "queued",
-        "W kolejce — kliknij ↩ Wyślij teraz, albo poczekaj na koniec tury"
+        tr("Queued — click ↩ Send now, or wait for the turn to end")
       );
       el.input.focus();
       return;
     }
 
-    await runSendTurn(text || "(załącznik)", atts, prefill == null);
+    await runSendTurn(text || tr("(attachment)"), atts, prefill == null);
   }
 
   /**
@@ -2377,8 +2408,8 @@
     // Zostaw _queued na bańce — runSendTurn ma ją ZREUSE'ować, nie sklonować.
     // Dopisek tylko w payloadzie do agenta.
     const payload =
-      (text || "(załącznik)") +
-      "\n\n[Wstrzyknieto w trakcie pracy — włącz to w bieżące zadanie, nie zaczynaj od zera.]";
+      (text || tr("(attachment)")) +
+      "\n\n[Injected mid-work — fold this into the current task, do not start over.]";
 
     // zdejmij badge „w kolejce” z DOM (tekst bańki bez zmian)
     const rows = el.messages.querySelectorAll(".msg.user");
@@ -2388,7 +2419,7 @@
       lastUser.querySelector(".queued-badge")?.remove();
     }
 
-    showToast("Wysyłam teraz (przerwano bieżącą turę)", "ok");
+    showToast(tr("Sending now (current turn interrupted)"), "ok");
     await runSendTurn(payload, atts, false, { reuseQueuedBubble: true });
   }
 
@@ -2449,7 +2480,7 @@
     } else {
       // świeża wiadomość (nie z kolejki)
       const showText =
-        displayText && displayText !== "(załącznik)" ? displayText : "";
+        displayText && displayText !== tr("(attachment)") ? displayText : "";
       if (showText || (atts && atts.length)) {
         const userMsg = {
           id: `u-local-${Date.now()}`,
@@ -2499,7 +2530,7 @@
       busySessionId = sessionId;
       snapshotCurrentBuildSession();
     }
-    setStatus("thinking", mode === "home" ? "Myślę…" : "Agent startuje…", mode, {
+    setStatus("thinking", mode === "home" ? tr("Thinking…") : "Agent startuje…", mode, {
       sessionId,
     });
     try {
@@ -2509,7 +2540,7 @@
     }
 
     const res = await api.chatSend({
-      text: text === "(załącznik)" ? "" : text,
+      text: text === tr("(attachment)") ? "" : text,
       sessionId,
       cwd,
       mode,
@@ -2539,8 +2570,8 @@
     }
     setBusy(false);
     if (!res.ok) {
-      showToast(res.error || "Nie udało się wysłać", "error");
-      setStatus("error", res.error || "Błąd");
+      showToast(res.error || tr("Send failed"), "error");
+      setStatus("error", res.error || tr("Error"));
       el.input.focus();
       // nadal spróbuj kolejkę
       await drainQueue();
@@ -2632,8 +2663,8 @@
       const inject = document.createElement("button");
       inject.type = "button";
       inject.className = "queued-inject";
-      inject.title = "Wyślij teraz — przerwij i dołącz do bieżącej roboty";
-      inject.textContent = "↩ Wyślij teraz";
+      inject.title = tr("Send now — interrupt and fold into current work");
+      inject.textContent = tr("↩ Send now");
       inject.onclick = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -2654,7 +2685,7 @@
     const atts = [];
     for (const it of items) {
       const t = (it.text || "").trim();
-      if (t && t !== "(załącznik)") texts.push(t);
+      if (t && t !== tr("(attachment)")) texts.push(t);
       if (it.attachments && it.attachments.length) {
         atts.push(...it.attachments);
       }
@@ -2663,7 +2694,7 @@
     const queuedBubbles = allMessages.filter((m) => m._queued && m.role === "user");
     if (queuedBubbles.length) {
       const keep = queuedBubbles[0];
-      keep.text = texts.join("\n") || "(załącznik)";
+      keep.text = texts.join("\n") || tr("(attachment)");
       keep.attachments = atts;
       for (let i = 1; i < queuedBubbles.length; i++) {
         const id = queuedBubbles[i].id;
@@ -2673,7 +2704,7 @@
       syncVisibleMessages();
     }
     return {
-      text: texts.join("\n") || "(załącznik)",
+      text: texts.join("\n") || tr("(attachment)"),
       attachments: atts,
     };
   }
@@ -2686,7 +2717,7 @@
     }
     drainingQueue = true;
     updateQueueChip();
-    setStatus("queued", "Kolejka → jedna wiadomość…");
+    setStatus("queued", tr("Queue → one message…"));
     const merged = coalesceQueue();
     updateQueueChip();
     if (merged) {
@@ -2697,7 +2728,7 @@
       const again = coalesceQueue();
       updateQueueChip();
       if (!again) break;
-      setStatus("queued", "Kolejka → jedna wiadomość…");
+      setStatus("queued", tr("Queue → one message…"));
       await runSendTurn(again.text, again.attachments || [], false);
     }
     drainingQueue = false;
@@ -2734,7 +2765,7 @@
     }
     pushBag();
     persistNav();
-    showToast(mode === "home" ? "Nowy czat Home" : "Nowa sesja Build — pisz poniżej", "ok");
+    showToast(mode === "home" ? "Nowy czat Home" : tr("New Build session — write below"), "ok");
   }
 
   function autosize() {
@@ -2793,7 +2824,7 @@
     if (act === "pin") {
       const cur = sessionFlagMap[id] || {};
       await markSessionFlag(id, { pinned: !cur.pinned });
-      showToast(cur.pinned ? "Odpięte" : "Przypięte", "ok");
+      showToast(cur.pinned ? tr("Unpinned") : tr("Pinned"), "ok");
       return;
     }
     if (act === "reveal") {
@@ -2832,7 +2863,7 @@
     if (act === "rename") {
       const name = await modalPrompt({
         title: "Rename",
-        body: "Tytuł na liście",
+        body: tr("Title in the list"),
         okLabel: "Save",
         inputValue: row.title,
       });
@@ -2842,7 +2873,7 @@
         title: String(name).trim(),
         mode,
       });
-      if (!res.ok) showToast(res.error || "Nie udało się zmienić nazwy", "error");
+      if (!res.ok) showToast(res.error || tr("Rename failed"), "error");
       else {
         if (selectedId === id) el.wsTitle.textContent = String(name).trim();
         await refresh();
@@ -2868,9 +2899,9 @@
       ratioWrap.classList.toggle("hidden", homeKind === "chat");
     }
     if (homeKind === "image") {
-      el.input.placeholder = "Opisz grafikę… (proporcje po prawej)";
+      el.input.placeholder = tr("Describe the image… (aspect ratio on the right)");
     } else if (homeKind === "video") {
-      el.input.placeholder = "Opisz wideo… (8 s, generuje się ok. minuty)";
+      el.input.placeholder = tr("Describe the video… (8 s, takes about a minute)");
     } else {
       el.input.placeholder =
         "Message Grok… (Enter = send, ⌘V = wklej screenshot)";
@@ -2880,7 +2911,7 @@
   document.getElementById("effort-select")?.addEventListener("change", async (e) => {
     effortLevel = e.target.value || "high";
     const res = await api.chatSetEffort(effortLevel);
-    if (!res.ok) showToast(res.error || "Nie udało się zmienić effort", "error");
+    if (!res.ok) showToast(res.error || tr("Effort change failed"), "error");
     else showToast(`Effort: ${effortLevel}`, "ok");
   });
   el.form.onsubmit = (e) => {
@@ -2902,7 +2933,7 @@
     // przekaż tryb — w Home trzeba przerwać żądanie HTTP, nie proces agenta
     const res = await api.chatStop({ mode });
     setBusy(false);
-    if (!res.ok) showToast(res.error || "Nie udało się zatrzymać", "error");
+    if (!res.ok) showToast(res.error || tr("Stop failed"), "error");
     else showToast("Zatrzymane", "ok");
   };
   el.modelSelect.addEventListener("change", async () => {
@@ -2910,7 +2941,7 @@
     if (mode === "home") homeModelId = id;
     else codeModelId = id;
     const res = await api.chatSetModel({ modelId: id, mode });
-    if (!res.ok) showToast(res.error || "Nie udało się zmienić modelu", "error");
+    if (!res.ok) showToast(res.error || tr("Model change failed"), "error");
   });
   el.btnToggleActivity.onclick = () => {
     showActivity = !showActivity;
@@ -3012,6 +3043,7 @@
     document.getElementById("set-cookies").checked = Boolean(s.readBrowserCookies);
     document.getElementById("set-python").value = s.pythonPath || "";
     document.getElementById("set-privacy").checked = Boolean(s.privacyMode);
+    document.getElementById("set-language").value = s.language || "en";
     el.settingsModal.classList.remove("hidden");
   };
   document.getElementById("set-cancel").onclick = () =>
@@ -3040,15 +3072,17 @@
   };
   document.getElementById("set-login").onclick = async () => {
     const res = await api.login();
-    if (!res.ok) showToast(res.error || "Logowanie nie wystartowało", "error");
+    if (!res.ok) showToast(res.error || tr("Log in did not start"), "error");
     else showToast("Logowanie otwarte w Terminalu", "ok");
   };
   document.getElementById("set-save").onclick = async () => {
     const theme = document.getElementById("set-theme").value;
     const permissionMode = document.getElementById("set-permission").value;
     const wantPrivacy = document.getElementById("set-privacy").checked;
+    const wantLang = document.getElementById("set-language").value;
     await api.setSettings({
       privacyMode: wantPrivacy,
+      language: wantLang,
       grokPath: document.getElementById("set-grok-path").value.trim(),
       defaultCwd: document.getElementById("set-cwd").value.trim(),
       showSubagents: document.getElementById("set-subagents").checked,
@@ -3062,6 +3096,7 @@
     permMode = permissionMode;
     paintPermChip();
     setPrivacyMode(wantPrivacy);
+    applyLanguage(wantLang, lastSystemLocale);
     el.settingsModal.classList.add("hidden");
     showToast("Zapisane", "ok");
     await refresh();
@@ -3076,7 +3111,7 @@
     el.accountModal.classList.add("hidden");
   document.getElementById("account-login").onclick = async () => {
     const res = await api.login();
-    if (!res.ok) showToast(res.error || "Logowanie nie wystartowało", "error");
+    if (!res.ok) showToast(res.error || tr("Log in did not start"), "error");
     else showToast("Logowanie otwarte", "ok");
   };
 
@@ -3092,8 +3127,8 @@
       api.setSettings({ privacyMode }).catch(() => {});
       showToast(
         privacyMode
-          ? "Tryb prywatności włączony — dane konta ukryte"
-          : "Tryb prywatności wyłączony",
+          ? tr("Privacy mode on — account details hidden")
+          : tr("Privacy mode off"),
         "ok"
       );
     }
@@ -3210,6 +3245,8 @@
       const es = document.getElementById("effort-select");
       if (es) es.value = effortLevel;
     }
+    // Język PRZED pierwszym renderem, żeby nie mrugnąć angielskim w PL
+    applyLanguage(data.settings?.language, data.settings?.systemLocale);
     permMode = data.settings?.permissionMode || "auto";
     paintPermChip();
     if (data.settings?.privacyMode) setPrivacyMode(true);
@@ -3299,7 +3336,7 @@
         usageEls.btn.classList.toggle("warn", weekly.percent >= 70 && weekly.percent < 90);
         usageEls.btn.classList.toggle("hot", weekly.percent >= 90);
         if (usageEls.weeklyMeta)
-          usageEls.weeklyMeta.textContent = Math.round(weekly.percent) + "% użyte";
+          usageEls.weeklyMeta.textContent = Math.round(weekly.percent) + tr("% used");
         setBar(usageEls.weeklyBar, weekly.percent);
         if (usageEls.weeklyDetail) {
           const reset = weekly.resetsAt
@@ -3329,8 +3366,9 @@
         if (usageEls.weeklyDetail) {
           usageEls.weeklyDetail.textContent =
             plan?.weeklyError ||
-            "Tygodniowy % : Ustawienia → „Czytaj ciasteczka grok.com”. " +
-            "xAI nie udostępnia tego limitu tokenowi z grok login.";
+            t(
+              "Weekly %: Settings → „Read grok.com cookies”. xAI does not expose this limit to the grok login token."
+            );
         }
       }
 
@@ -3360,7 +3398,7 @@
             ? `${fmtTokens(used)} / ${fmtTokens(total)} · tury ${u.context?.turns ?? "—"} · tool ${u.context?.tools ?? "—"}`
             : mode === "home"
               ? "Home nie zapisuje context window jak Build"
-              : "Brak signals.json — otwórz sesję Build";
+              : tr("No signals.json — open a Build session");
       }
       const planBit = plan?.tierLabel ? ` · ${plan.tierLabel}` : "";
       if (usageEls.account) {
@@ -3408,8 +3446,8 @@
     permBtn.classList.toggle("mode-ask", ask);
     permBtn.classList.toggle("mode-auto", !ask);
     permBtn.title = ask
-      ? "Agent pyta o zgodę na każde narzędzie. Kliknij, żeby przełączyć na Auto."
-      : "Agent używa narzędzi bez pytania. Kliknij, żeby przełączyć na Pytaj.";
+      ? tr("The agent asks before every tool. Click to switch to Auto.")
+      : tr("The agent uses tools without asking. Click to switch to Ask.");
   }
 
   if (permBtn) {
@@ -3423,8 +3461,8 @@
       }
       showToast(
         permMode === "ask"
-          ? "Pytaj: agent poprosi o zgodę na każde narzędzie"
-          : "Auto: agent działa bez pytania",
+          ? tr("Ask: the agent will request approval for every tool")
+          : tr("Auto: the agent works without asking"),
         "ok"
       );
     };
@@ -3436,13 +3474,13 @@
   let permShowing = false;
 
   function toolLabel(toolCall) {
-    if (!toolCall) return "Narzędzie";
+    if (!toolCall) return tr("Tool");
     return (
       toolCall.title ||
       toolCall.kind ||
       toolCall.name ||
       toolCall.toolName ||
-      "Narzędzie"
+      tr("Tool")
     );
   }
 
@@ -3498,7 +3536,7 @@
     const deny = document.createElement("button");
     deny.type = "button";
     deny.className = "btn";
-    deny.textContent = "Odmów";
+    deny.textContent = tr("Deny");
     deny.onclick = () => answer(null);
     actions.appendChild(deny);
 
@@ -3526,7 +3564,7 @@
         btn.textContent = prev;
       }, 1200);
     } catch {
-      showToast("Nie udało się skopiować", "error");
+      showToast(tr("Copy failed"), "error");
     }
   });
 
