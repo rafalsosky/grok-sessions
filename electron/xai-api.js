@@ -250,7 +250,7 @@ async function downloadBuffer(url, { signal = null, tries = 3 } = {}) {
       const buf = Buffer.from(await res.arrayBuffer());
       const expected = Number(res.headers.get("content-length") || 0);
       if (!buf.length || (expected && buf.length !== expected)) {
-        throw new Error(`urwane pobieranie (${buf.length}/${expected} B)`);
+        throw new Error(`incomplete download (${buf.length}/${expected} B)`);
       }
       return { buf, mimeType: res.headers.get("content-type") || "" };
     } catch (err) {
@@ -260,7 +260,7 @@ async function downloadBuffer(url, { signal = null, tries = 3 } = {}) {
     }
   }
   throw new Error(
-    `Nie udało się pobrać pliku (${lastErr ? lastErr.message : "no details"}): ${url}`
+    `Failed to download file (${lastErr ? lastErr.message : "no details"}): ${url}`
   );
 }
 
@@ -328,7 +328,7 @@ async function generateVideo(
   const requestId = start && (start.request_id || start.id);
   if (!requestId) {
     throw new Error(
-      `Video API nie zwróciło request_id: ${JSON.stringify(start).slice(0, 200)}`
+      `Video API did not return request_id: ${JSON.stringify(start).slice(0, 200)}`
     );
   }
 
@@ -349,7 +349,7 @@ async function generateVideo(
     if (st === "done" || (job && job.video && job.video.url)) break;
     if (st === "failed" || st === "error" || (job && job.error)) {
       throw new Error(
-        `Generowanie wideo nie powiodło się: ${JSON.stringify(job).slice(0, 200)}`
+        `Video generation failed: ${JSON.stringify(job).slice(0, 200)}`
       );
     }
     if (typeof onProgress === "function") {
@@ -361,7 +361,7 @@ async function generateVideo(
   const url = job && job.video && job.video.url;
   if (!url) {
     throw new Error(
-      `Wideo nie zdążyło się wygenerować w ${VIDEO_TIMEOUT_MS / 1000} s (request_id=${requestId})`
+      `Video did not finish in ${VIDEO_TIMEOUT_MS / 1000} s (request_id=${requestId})`
     );
   }
   const dl = await downloadBuffer(url, { signal });

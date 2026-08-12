@@ -390,6 +390,20 @@ group("home-chats: replaceMessages nadpisuje plik");
     );
   });
 
+  test("pruneEmptyHomeChats kasuje puste New chat, zostawia z treścią", () => {
+    const empty = hc.createHomeChat(dir, "New chat");
+    const filled = hc.createHomeChat(dir, "New chat");
+    hc.appendHomeMessage(dir, filled.id, {
+      id: "u1",
+      role: "user",
+      content: "hej",
+    });
+    const n = hc.pruneEmptyHomeChats(dir);
+    assert.ok(n >= 1);
+    assert.strictEqual(hc.loadHomeChat(dir, empty.id), null);
+    assert.ok(hc.loadHomeChat(dir, filled.id));
+  });
+
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
@@ -408,6 +422,45 @@ group("build: New session odłącza bieżącą turę");
     assert.ok(fn, "brak newChat");
     assert.ok(/chatStop/.test(fn[0]), "newChat nie przerywa agenta");
     assert.ok(/mode === "grok"/.test(fn[0]), "newChat nie rozróżnia Build");
+  });
+
+  test("newChat w Home przerywa myślenie i nie tworzy pustego pliku", () => {
+    const fn = app.match(/async function newChat\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(fn, "brak newChat");
+    assert.ok(
+      /mode === "home"[\s\S]*chatStop|chatStop[\s\S]*mode === "home"/.test(fn[0]),
+      "Home New chat nie woła Stop"
+    );
+    assert.ok(
+      !/chatNew\(\{\s*mode:\s*"home"\s*\}\)/.test(fn[0]),
+      "Home New chat nadal od razu tworzy pusty plik"
+    );
+  });
+
+  test("podgląd załącznika nie czyta ścieżki spoza katalogu attachments", () => {
+    const att = require("../electron/attachments");
+    const root = "/tmp/sg-user/attachments";
+    assert.strictEqual(
+      att.isAllowedPreviewPath(root, "/tmp/sg-user/attachments/a.png"),
+      true
+    );
+    assert.strictEqual(
+      att.isAllowedPreviewPath(root, "/etc/passwd"),
+      false
+    );
+    assert.strictEqual(
+      att.isAllowedPreviewPath(root, "/tmp/sg-user/attachments/../settings.json"),
+      false
+    );
+  });
+
+  test("set-model w Build nie restartuje agenta w trakcie tury", () => {
+    const block = main.match(/ipcMain\.handle\("chat:set-model"[\s\S]*?\n  \}\);/);
+    assert.ok(block, "brak chat:set-model");
+    assert.ok(
+      /promptBusy\.grok/.test(block[0]),
+      "zmiana modelu w Build nie sprawdza, czy tura leci"
+    );
   });
 
   test("tooltip kropek nie jest surowym title=tr(", () => {
@@ -618,7 +671,7 @@ group("electron: twarde zabezpieczenia w main.js");
   await asyncTest("urwane pobieranie rzuca błąd, nie oddaje kikuta", async () => {
     await assert.rejects(
       () => xai.downloadBuffer(`${base}/truncated`, { tries: 1 }),
-      /Nie udało się pobrać/
+      /Failed to download/
     );
   });
   srv.close();

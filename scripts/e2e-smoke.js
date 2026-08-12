@@ -49,7 +49,7 @@ async function main() {
 
   const acp = new AcpClient({
     grokPath,
-    model: "grok-4.5",
+    model: "grok-4.6",
     alwaysApprove: true,
   });
 

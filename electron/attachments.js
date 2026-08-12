@@ -11,6 +11,15 @@ function attachRoot(userDataDir) {
   return d;
 }
 
+const MAX_ATTACH_BYTES = 20 * 1024 * 1024;
+
+function isAllowedPreviewPath(root, filePath) {
+  if (!root || !filePath) return false;
+  const base = path.resolve(root);
+  const resolved = path.resolve(filePath);
+  return resolved === base || resolved.startsWith(base + path.sep);
+}
+
 function extFromMime(mime) {
   const m = String(mime || "").toLowerCase();
   if (m.includes("png")) return ".png";
@@ -36,6 +45,9 @@ function saveBase64(userDataDir, { name, mimeType, base64, kind }) {
   const fileName = `${Date.now()}-${id}-${safe}`;
   const filePath = path.join(root, fileName);
   const buf = Buffer.from(base64, "base64");
+  if (buf.length > MAX_ATTACH_BYTES) {
+    return { ok: false, error: "File too large (max 20 MB)" };
+  }
   fs.writeFileSync(filePath, buf);
   const isImage = String(mimeType || "").startsWith("image/");
   return {
@@ -175,4 +187,6 @@ module.exports = {
   formatAttachmentsForPrompt,
   stripAttachmentAppendix,
   extFromMime,
+  isAllowedPreviewPath,
+  MAX_ATTACH_BYTES,
 };

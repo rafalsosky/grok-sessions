@@ -24,7 +24,29 @@ function newId() {
   return "home-" + Date.now().toString(16) + "-" + Math.random().toString(16).slice(2);
 }
 
+function pruneEmptyHomeChats(userDataDir) {
+  const d = ensureDir(userDataDir);
+  let removed = 0;
+  for (const name of fs.readdirSync(d)) {
+    if (!name.endsWith(".json")) continue;
+    const full = path.join(d, name);
+    try {
+      const raw = JSON.parse(fs.readFileSync(full, "utf8"));
+      const empty = !raw.messages || raw.messages.length === 0;
+      const untitled = !raw.title || raw.title === "New chat";
+      if (empty && untitled) {
+        fs.unlinkSync(full);
+        removed += 1;
+      }
+    } catch {
+      /* skip broken */
+    }
+  }
+  return removed;
+}
+
 function listHomeChats(userDataDir) {
+  pruneEmptyHomeChats(userDataDir);
   const d = ensureDir(userDataDir);
   const rows = [];
   for (const name of fs.readdirSync(d)) {
@@ -156,5 +178,6 @@ module.exports = {
   appendHomeMessage,
   replaceMessages,
   toDiskMessage,
+  pruneEmptyHomeChats,
   homeDir,
 };

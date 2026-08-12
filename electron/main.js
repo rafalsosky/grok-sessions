@@ -25,6 +25,8 @@ const {
   importPath,
   formatAttachmentsForPrompt,
   extFromMime,
+  attachRoot,
+  isAllowedPreviewPath,
 } = require("./attachments");
 const { getUsage } = require("./usage");
 const sessionFlags = require("./session-flags");
@@ -498,6 +500,7 @@ async function sendHomeChat({
       base64: vid.b64,
       kind: "video",
     });
+    if (!saved.ok) throw new Error(saved.error || "Could not save video");
     const assistantMsg = {
       id: `a-${Date.now()}`,
       role: "assistant",
@@ -534,6 +537,7 @@ async function sendHomeChat({
       base64: img.b64,
       kind: "image",
     });
+    if (!saved.ok) throw new Error(saved.error || "Could not save image");
     const assistantMsg = {
       id: `a-${Date.now()}`,
       role: "assistant",
@@ -978,6 +982,9 @@ function registerIpc() {
     const mode = typeof payload === "object" && payload ? payload.mode : "grok";
     if (!modelId) return { ok: false, error: "No model" };
 
+    if (mode !== "home" && promptBusy.grok) {
+      return { ok: false, error: "Agent is still working" };
+    }
     const pin = pinLatestAfterManualPick(modelId, mode);
     if (mode === "home") {
       saveSettings(userDataDir(), { homeModelId: modelId, ...pin });
@@ -1158,6 +1165,9 @@ function registerIpc() {
     try {
       if (!filePath || !fs.existsSync(filePath)) {
         return { ok: false, error: "missing" };
+      }
+      if (!isAllowedPreviewPath(attachRoot(userDataDir()), filePath)) {
+        return { ok: false, error: "not allowed" };
       }
       const ext = path.extname(filePath).toLowerCase();
       if (![".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4"].includes(ext)) {

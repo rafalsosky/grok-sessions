@@ -204,17 +204,17 @@
   }
 
   function dayBucket(iso) {
-    if (!iso) return "Earlier";
+    if (!iso) return tr("Earlier");
     const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return "Earlier";
+    if (Number.isNaN(d.getTime())) return tr("Earlier");
     const now = new Date();
     const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const startThat = new Date(d.getFullYear(), d.getMonth(), d.getDate());
     const diff = (startToday - startThat) / 86400000;
-    if (diff === 0) return "Today";
-    if (diff === 1) return "Yesterday";
-    if (diff < 7) return "Previous 7 days";
-    return "Earlier";
+    if (diff === 0) return tr("Today");
+    if (diff === 1) return tr("Yesterday");
+    if (diff < 7) return tr("Previous 7 days");
+    return tr("Earlier");
   }
 
   function showToast(msg, kind = "") {
@@ -521,8 +521,8 @@
 
   function updatePathChips(cwd) {
     if (mode === "home") {
-      el.cwdChip.textContent = "Home chat";
-      el.wsCwd.textContent = "browser-style";
+      el.cwdChip.textContent = tr("Home chat");
+      el.wsCwd.textContent = tr("browser-style");
     } else {
       el.cwdChip.textContent = maskPath(cwd || defaultCwd);
       el.wsCwd.textContent = basenameCwd(cwd || defaultCwd);
@@ -1603,14 +1603,14 @@
    * Usuwa z WIDOKU. W trybie Build sesja agenta nadal pamięta tę turę —
    * mówimy to wprost zamiast udawać cofnięcie.
    */
-  function deleteMessage(m) {
+  async function deleteMessage(m) {
     const i = indexOfMsg(m);
     if (i < 0) return;
     allMessages.splice(i, 1);
     syncVisibleMessages();
     renderMessages({ force: true });
     pushBag();
-    persistHomeView();
+    await persistHomeView();
     showToast(
       mode === "grok"
         ? tr("Removed from view (the agent still remembers it)")
@@ -1620,7 +1620,7 @@
   }
 
   /** Wstaw treść do composera i odetnij historię od tego miejsca (widok). */
-  function editMessage(m) {
+  async function editMessage(m) {
     if (busy) {
       showToast(tr("Stop the current turn first (■)"), "");
       return;
@@ -1633,7 +1633,7 @@
     syncVisibleMessages();
     renderMessages({ force: true });
     pushBag();
-    persistHomeView();
+    await persistHomeView();
     el.input.focus();
     showToast(
       mode === "grok"
@@ -2819,6 +2819,15 @@
         setBusy(false, "grok");
         busySessionId = null;
       }
+    } else if (mode === "home" && wasBusy) {
+      setBusy(false, "home");
+      el.statusBar.classList.add("hidden");
+      try {
+        await api.chatStop({ mode: "home" });
+      } catch {
+        /* ignore */
+      }
+      setBusy(false, "home");
     }
 
     selectedId = null;
@@ -2844,14 +2853,6 @@
     updateQueueChip();
     el.input.focus();
 
-    if (mode === "home") {
-      const res = await api.chatNew({ mode: "home" });
-      if (res.ok) {
-        liveSessionId = res.sessionId;
-        selectedId = res.sessionId;
-        await refresh();
-      }
-    }
     pushBag();
     persistNav();
     showToast(mode === "home" ? tr("New Home chat") : tr("New Build session — write below"), "ok");
@@ -2927,9 +2928,9 @@
     }
     if (act === "delete") {
       const ok = await modalPrompt({
-        title: "Delete chat?",
-        body: `${row.title}\n\nPermanent.`,
-        okLabel: "Delete",
+        title: tr("Delete chat?"),
+        body: `${row.title}\n\n${tr("Permanent")}`,
+        okLabel: tr("Delete"),
       });
       if (!ok) return;
       const res = await api.deleteSession({ id, mode });
