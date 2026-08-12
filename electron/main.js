@@ -406,7 +406,7 @@ async function ensureAcp() {
     acp.on("models", async (m) => {
       send("chat:models", m);
       const settings = getSettings();
-      if (!settings.alwaysLatestModel) {
+      if (!settings.alwaysLatestModel || promptBusy.grok) {
         pushSessions();
         return;
       }
@@ -501,9 +501,9 @@ async function sendHomeChat({
     const assistantMsg = {
       id: `a-${Date.now()}`,
       role: "assistant",
-      content: `Wygenerowano wideo (${aspectRatio || "16:9"}${
+      content: `Generated video (${aspectRatio || "16:9"}${
         vid.duration ? `, ${vid.duration} s` : ""
-      }) dla: „${prompt.slice(0, 120)}"`,
+      }) for: “${prompt.slice(0, 120)}”`,
       videos: [{ path: saved.path, mimeType: saved.mimeType }],
       createdAt: new Date().toISOString(),
     };
@@ -537,7 +537,7 @@ async function sendHomeChat({
     const assistantMsg = {
       id: `a-${Date.now()}`,
       role: "assistant",
-      content: `Wygenerowano grafikę (${aspectRatio || "1:1"}) dla: „${prompt.slice(0, 120)}"`,
+      content: `Generated image (${aspectRatio || "1:1"}) for: “${prompt.slice(0, 120)}”`,
       images: [
         {
           path: saved.path,
@@ -738,6 +738,22 @@ function registerIpc() {
     return { ok: true, flag };
   });
 
+  ipcMain.handle("nav:set", async (_e, partial) => {
+    const p = partial || {};
+    saveSettings(userDataDir(), {
+      lastMode: p.lastMode,
+      lastHomeSessionId: p.lastHomeSessionId,
+      lastCodeSessionId: p.lastCodeSessionId,
+    });
+    return { ok: true };
+  });
+
+  ipcMain.handle("home:replace-messages", async (_e, payload) => {
+    const { id, messages } = payload || {};
+    if (!id) return { ok: false, error: "no id" };
+    return homeChats.replaceMessages(userDataDir(), id, messages || []);
+  });
+
   ipcMain.handle("settings:get", async () => getSettings());
 
   ipcMain.handle("settings:set", async (_e, partial) => {
@@ -900,7 +916,7 @@ function registerIpc() {
       } else {
         if (effort && acp && acp.reasoningEffort !== effort) {
           saveSettings(userDataDir(), { effort });
-          await acp.setEffort(effort);
+          await acp.setEffort(effort, { cwd });
         } else if (effort) {
           saveSettings(userDataDir(), { effort });
         }
@@ -940,16 +956,15 @@ function registerIpc() {
     return { ok };
   });
 
-  ipcMain.handle("chat:set-effort", async (_e, effort) => {
+  ipcMain.handle("chat:set-effort", async (_e, payload) => {
+    const effort = typeof payload === "string" ? payload : payload && payload.effort;
+    const cwd = typeof payload === "object" && payload ? payload.cwd : null;
     const level = ["low", "medium", "high", "xhigh"].includes(effort)
       ? effort
       : "high";
     saveSettings(userDataDir(), { effort: level });
     try {
-      if (acp) await acp.setEffort(level);
-      else {
-        // next ensureAcp will pick settings.effort
-      }
+      if (acp) await acp.setEffort(level, { cwd });
       return { ok: true, effort: level };
     } catch (err) {
       return { ok: false, error: err.message };

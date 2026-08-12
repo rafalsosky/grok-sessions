@@ -313,7 +313,7 @@ async function generateVideo(
   token,
   {
     prompt,
-    model = "grok-imagine-video",
+    model = "grok-imagine-video-1.5",
     aspect_ratio = "16:9",
     signal = null,
     onProgress = null,

@@ -206,7 +206,7 @@ group("i18n: angielski bazowy, polski kompletny");
   // przepuściła „Zalogowano”, „konto ukryte” i „⌘V = wklej screenshot”.
   // Stąd druga siatka: typowo polskie słowa bez ogonków.
   const POLSKIE_SLOWA =
-    /\b(zalogowano|konto|ukryte|ukryty|wklej|napisz|pisz|dalej|wyslij|jeszcze|sesji|sesja|czat|czaty|kolejce|kolejki|wiadomosc|wiadomosci|brak|pracuje|wybierz|nowy|nowa|usun|zmien|pokaz|ukryj|zrzut|ekranu|plik|pliki|teraz|przez|jako|albo|nieprzeczytane|przeczytane|znaleziona|zapisuje)\b/i;
+    /\b(zalogowano|konto|ukryte|ukryty|wklej|napisz|pisz|dalej|wyslij|jeszcze|sesji|sesja|czat|czaty|kolejce|kolejki|wiadomosc|wiadomosci|brak|pracuje|wybierz|nowy|nowa|usun|zmien|pokaz|ukryj|zrzut|ekranu|plik|pliki|teraz|przez|jako|albo|nieprzeczytane|przeczytane|znaleziona|zapisuje|zatrzymane|zapisane|skopiowane|edytuj|logowanie|otwarte|aktywna|startuje|kroki|toku)\b/i;
 
   test("w kodzie UI nie ma polskich literałów", () => {
     const zle = [];
@@ -350,6 +350,113 @@ group("models: ranking i filtr listy Home");
       }),
       "grok-4.5"
     );
+  });
+}
+
+/* ── 3c. Home: edycja musi iść na dysk ────────────────────────────────
+   Retry/edycja/kasowanie tęły tylko allMessages. Po ponownym otwarciu
+   wracała stara historia. */
+group("home-chats: replaceMessages nadpisuje plik");
+{
+  const hc = require("../electron/home-chats");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-home-test-"));
+
+  test("replaceMessages obcina historię na dysku", () => {
+    const chat = hc.createHomeChat(dir, "T");
+    hc.appendHomeMessage(dir, chat.id, {
+      id: "u1",
+      role: "user",
+      content: "raz",
+    });
+    hc.appendHomeMessage(dir, chat.id, {
+      id: "a1",
+      role: "assistant",
+      content: "odp",
+    });
+    const out = hc.replaceMessages(dir, chat.id, [
+      { id: "u1", role: "user", content: "raz" },
+    ]);
+    assert.ok(out.ok);
+    const loaded = hc.loadHomeChat(dir, chat.id);
+    assert.strictEqual(loaded.messages.length, 1);
+    assert.strictEqual(loaded.messages[0].content, "raz");
+  });
+
+  test("toDiskMessage bierze text albo content", () => {
+    assert.strictEqual(hc.toDiskMessage({ role: "user", text: "abc" }).content, "abc");
+    assert.strictEqual(
+      hc.toDiskMessage({ role: "assistant", content: "xyz" }).content,
+      "xyz"
+    );
+  });
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+/* ── 3d. New session w Build nie może zostać przy starej turze ─────────
+   Klik „New session” zostawiał pasek Thinking i kolejny Enter szedł
+   do tej samej sesji (kolejka), zamiast otworzyć nową. */
+group("build: New session odłącza bieżącą turę");
+{
+  const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+  const main = fs.readFileSync(path.join(ROOT, "electron", "main.js"), "utf8");
+  const acp = fs.readFileSync(path.join(ROOT, "electron", "acp-client.js"), "utf8");
+  const xai = fs.readFileSync(path.join(ROOT, "electron", "xai-api.js"), "utf8");
+
+  test("newChat w Build woła Stop zanim wyczyści widok", () => {
+    const fn = app.match(/async function newChat\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(fn, "brak newChat");
+    assert.ok(/chatStop/.test(fn[0]), "newChat nie przerywa agenta");
+    assert.ok(/mode === "grok"/.test(fn[0]), "newChat nie rozróżnia Build");
+  });
+
+  test("tooltip kropek nie jest surowym title=tr(", () => {
+    assert.ok(!/title=tr\(/.test(app), "zepsuty tooltip title=tr(...)");
+  });
+
+  test("setEffort nie wrzuca cwd na homedir", () => {
+    const fn = acp.match(/async setEffort\([\s\S]*?\n  \}/);
+    assert.ok(fn, "brak setEffort");
+    assert.ok(
+      !/homedir\(\)/.test(fn[0]),
+      "setEffort nadal ładuje sesję z os.homedir()"
+    );
+    assert.ok(/cwd/.test(fn[0]), "setEffort nie przyjmuje cwd sesji");
+  });
+
+  test("wideo idzie modelem 1.5", () => {
+    assert.ok(
+      /grok-imagine-video-1\.5/.test(xai),
+      "brak grok-imagine-video-1.5"
+    );
+    const def = xai.match(/model = "([^"]+)"/);
+    // pierwsza domyślna w generateVideo
+    const vid = xai.match(/async function generateVideo[\s\S]*?model = "([^"]+)"/);
+    assert.ok(vid, "brak defaultu w generateVideo");
+    assert.strictEqual(vid[1], "grok-imagine-video-1.5");
+  });
+
+  test("przełączenie najnowszego modelu nie rusza tury w toku", () => {
+    assert.ok(
+      /promptBusy\.grok/.test(main) && /alwaysLatestModel/.test(main),
+      "brak wartownika alwaysLatest vs tura"
+    );
+    const block = main.match(/acp\.on\("models"[\s\S]*?\}\);/);
+    assert.ok(block, "brak handlera models");
+    assert.ok(
+      /promptBusy/.test(block[0]),
+      "handler models nie sprawdza, czy agent pracuje"
+    );
+  });
+
+  test("persistNav nie woła pełnego settings:set", () => {
+    const fn = app.match(/function persistNav\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(fn, "brak persistNav");
+    assert.ok(
+      !/setSettings\(payload\)/.test(fn[0]),
+      "persistNav nadal leci przez settings:set (odświeża modele i listę)"
+    );
+    assert.ok(/setNav|nav:set|saveNav/.test(fn[0]), "brak lekkiego zapisu nawigacji");
   });
 }
 

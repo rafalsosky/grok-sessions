@@ -45,8 +45,14 @@ const PL = {
     "Napisz do Groka… (Enter = wyślij, ⌘V = wklej zrzut)",
   "Describe the image… (aspect ratio on the right)":
     "Opisz grafikę… (proporcje po prawej)",
+  "Describe the video… (takes about a minute)":
+    "Opisz wideo… (generuje się ok. minuty)",
   "Describe the video… (8 s, takes about a minute)":
     "Opisz wideo… (8 s, generuje się ok. minuty)",
+  Steps: "Kroki",
+  "Active in terminal": "Aktywna w terminalu",
+  "Home chats are stored in the app data folder":
+    "Czaty Home są w folderze danych aplikacji",
   "Keep typing — Enter adds to the queue…":
     "Pisz dalej — Enter doda do kolejki…",
   "Agent is working in another Build session…":

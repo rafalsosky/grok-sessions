@@ -87,6 +87,38 @@ function renameHomeChat(userDataDir, id, title) {
   return { ok: true, chat };
 }
 
+function toDiskMessage(m) {
+  if (!m || typeof m !== "object") {
+    return {
+      id: "",
+      role: "user",
+      content: "",
+      createdAt: new Date().toISOString(),
+    };
+  }
+  return {
+    id: m.id || "",
+    role: m.role === "assistant" ? "assistant" : "user",
+    content:
+      m.content != null && String(m.content) !== ""
+        ? String(m.content)
+        : String(m.text || ""),
+    attachments: m.attachments || [],
+    images: m.images || [],
+    videos: m.videos || [],
+    createdAt: m.createdAt || new Date().toISOString(),
+  };
+}
+
+function replaceMessages(userDataDir, id, messages) {
+  const chat = loadHomeChat(userDataDir, id);
+  if (!chat) return { ok: false, error: "Not found" };
+  chat.messages = (messages || []).map(toDiskMessage);
+  chat.updatedAt = new Date().toISOString();
+  saveHomeChat(userDataDir, chat);
+  return { ok: true, chat };
+}
+
 function appendHomeMessage(userDataDir, id, message) {
   let chat = loadHomeChat(userDataDir, id);
   if (!chat) {
@@ -122,5 +154,7 @@ module.exports = {
   deleteHomeChat,
   renameHomeChat,
   appendHomeMessage,
+  replaceMessages,
+  toDiskMessage,
   homeDir,
 };

@@ -31,6 +31,7 @@ class AcpClient extends EventEmitter {
     this.models = [];
     this.currentModelId = null;
     this._starting = null;
+    this.cwd = null;
   }
 
   async start() {
@@ -240,6 +241,7 @@ class AcpClient extends EventEmitter {
 
   async ensureSession({ sessionId, cwd, mode }) {
     await this.start();
+    if (cwd) this.cwd = cwd;
     if (sessionId && this.sessionId === sessionId) return { sessionId };
 
     if (sessionId) {
@@ -310,17 +312,19 @@ class AcpClient extends EventEmitter {
     return result;
   }
 
-  async setEffort(level) {
+  async setEffort(level, { cwd } = {}) {
     this.reasoningEffort = level || "high";
+    if (cwd) this.cwd = cwd;
     // Effort na żywym agencie — restart procesu (pewne)
     const sid = this.sessionId;
+    const workCwd = this.cwd;
     await this.stop();
     await this.start();
     if (sid) {
       try {
         await this.ensureSession({
           sessionId: sid,
-          cwd: require("os").homedir(),
+          cwd: workCwd,
         });
       } catch {
         /* new session if load fails */

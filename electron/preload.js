@@ -11,6 +11,9 @@ contextBridge.exposeInMainWorld("grokSessions", {
   },
   getSettings: () => ipcRenderer.invoke("settings:get"),
   setSettings: (partial) => ipcRenderer.invoke("settings:set", partial),
+  setNav: (partial) => ipcRenderer.invoke("nav:set", partial),
+  replaceHomeMessages: (payload) =>
+    ipcRenderer.invoke("home:replace-messages", payload),
   transcript: (payload) => ipcRenderer.invoke("session:transcript", payload),
   chatNew: (payload) => ipcRenderer.invoke("chat:new", payload),
   chatOpen: (payload) => ipcRenderer.invoke("chat:open", payload),

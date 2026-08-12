@@ -41,6 +41,8 @@
   let permMode = "auto";
   /** Session ID where agent is currently working (only that row shows „pracuje”) */
   let busySessionId = null;
+  /** New session: nie wciągaj Thinking ze starej tury, dopóki nie wyślesz. */
+  let detachedBuild = false;
   /** { [sessionId]: { unread, pinned } } */
   let sessionFlagMap = {};
   /**
@@ -124,7 +126,7 @@
       lastHomeSessionId: bags.home.liveSessionId || bags.home.selectedId || "",
       lastCodeSessionId: bags.grok.liveSessionId || bags.grok.selectedId || "",
     };
-    api.setSettings(payload).catch(() => {});
+    api.setNav(payload).catch(() => {});
   }
 
   const el = {
@@ -394,7 +396,7 @@
     el.btnToggleActivity.classList.toggle("hidden", liveTools.length === 0);
     el.btnToggleActivity.textContent = showActivity
       ? tr("Hide steps")
-      : `Kroki (${liveTools.length})`;
+      : `${tr("Steps")} (${liveTools.length})`;
 
     if (!showActivity || !liveTools.length) {
       el.activityPanel.classList.add("hidden");
@@ -406,7 +408,7 @@
     if (active.length) {
       const h = document.createElement("div");
       h.className = "activity-group";
-      h.textContent = "W toku";
+      h.textContent = tr("In progress");
       el.activityPanel.appendChild(h);
       for (const t of active) {
         const row = document.createElement("div");
@@ -445,15 +447,15 @@
     el.tabHome.classList.toggle("active", mode === "home");
     el.tabGrok.classList.toggle("active", mode === "grok");
     el.wsModeBadge.textContent = mode === "home" ? "Home" : "Build";
-    el.btnNewLabel.textContent = mode === "home" ? "New chat" : "New session";
+    el.btnNewLabel.textContent = mode === "home" ? tr("New chat") : tr("New session");
     el.recentsLabel.textContent =
-      mode === "home" ? "Recents · Home" : "Recents · Build";
+      mode === "home" ? tr("Recents · Home") : tr("Recents · Build");
     el.finePrint.textContent =
       mode === "home"
         ? tr("Home · chat and graphics (/image …) · drop files or paste a screenshot")
         : tr("Build · agent with tools · attachments as paths on disk");
     document.getElementById("hero-title").textContent =
-      mode === "home" ? "How can I help you today?" : "What should we build?";
+      mode === "home" ? tr("How can I help you today?") : tr("What should we build?");
     document.getElementById("hero-sub").textContent =
       mode === "home"
         ? tr("Like Grok in the browser: chat, ideas, /image for graphics. Not a coding agent.")
@@ -605,13 +607,19 @@
             ${fl.unread ? '<span class="unread-dot" title="Unread"></span>' : ""}
             ${
               isWorking
-                ? '<span class="live-dot working" title=tr("Working in this session")></span>'
+                ? '<span class="live-dot working"></span>'
                 : isTerminalLive
-                  ? '<span class="live-dot" title="Aktywna w terminalu"></span>'
+                  ? '<span class="live-dot"></span>'
                   : ""
             }
           </div>`;
         li.querySelector(".title").textContent = r.title;
+        const liveDot = li.querySelector(".live-dot");
+        if (liveDot) {
+          liveDot.title = isWorking
+            ? tr("Working in this session")
+            : tr("Active in terminal");
+        }
         li.querySelector(".meta").textContent = [
           mode === "home" ? "Home" : basenameCwd(r.cwd),
           isWorking
@@ -1026,7 +1034,7 @@
             ? cleanUserText(m.text || "")
             : cleanAssistantText(m.text || "");
         await navigator.clipboard.writeText(clean || m.text || "");
-        showToast("Skopiowane", "ok");
+        showToast(tr("Copied"), "ok");
       } catch {
         showToast(tr("Copy failed"), "error");
       }
@@ -1034,7 +1042,7 @@
 
     if (!m._queued) {
       if (m.role === "user") {
-        mkBtn("Edytuj", tr("Go back to this message and send a corrected version"), () =>
+        mkBtn(tr("Edit"), tr("Go back to this message and send a corrected version"), () =>
           editMessage(m)
         );
       }
@@ -1333,7 +1341,9 @@
       homeModels = payload.homeModels;
     }
     // busy tylko na jednej sesji Build
-    if (payload.busySessionId !== undefined) {
+    if (detachedBuild && mode === "grok") {
+      /* nowa sesja — nie przywracaj starego Thinking */
+    } else if (payload.busySessionId !== undefined) {
       busySessionId = payload.busySessionId || null;
     } else if (payload.promptBusy && payload.activeSessionId) {
       busySessionId = payload.activeSessionId;
@@ -1416,6 +1426,7 @@
 
   function isViewingSession(sid) {
     if (!sid) return false;
+    if (detachedBuild) return false;
     // wyłącznie selectedId — liveSessionId bywa mylące przy race
     return mode === "grok" && selectedId === sid;
   }
@@ -1599,6 +1610,7 @@
     syncVisibleMessages();
     renderMessages({ force: true });
     pushBag();
+    persistHomeView();
     showToast(
       mode === "grok"
         ? tr("Removed from view (the agent still remembers it)")
@@ -1621,6 +1633,7 @@
     syncVisibleMessages();
     renderMessages({ force: true });
     pushBag();
+    persistHomeView();
     el.input.focus();
     showToast(
       mode === "grok"
@@ -1651,6 +1664,7 @@
     allMessages = allMessages.slice(0, from);
     syncVisibleMessages();
     renderMessages({ force: true });
+    await persistHomeView();
     await runSendTurn(text || tr("(attachment)"), atts, false);
   }
 
@@ -2384,7 +2398,7 @@
           _local: true,
           _queued: true,
         });
-        showToast(`W kolejce (${messageQueue.length})`, "ok");
+        showToast(`${tr("Queue")} (${messageQueue.length})`, "ok");
       }
       if (prefill == null) el.input.value = "";
       attachments = [];
@@ -2457,6 +2471,7 @@
    */
   async function runSendTurn(text, atts, clearInput, opts = {}) {
     const cwd = selectedRow()?.cwd || defaultCwd;
+    if (mode === "grok") detachedBuild = false;
     const sessionId = liveSessionId || selectedId || null;
     const displayText = cleanUserText(text); // bez markerów / „Wstrzyknieto…”
 
@@ -2556,7 +2571,7 @@
       busySessionId = sessionId;
       snapshotCurrentBuildSession();
     }
-    setStatus("thinking", mode === "home" ? tr("Thinking…") : "Agent startuje…", mode, {
+    setStatus("thinking", mode === "home" ? tr("Thinking…") : tr("Agent starting…"), mode, {
       sessionId,
     });
     try {
@@ -2761,7 +2776,51 @@
     updateQueueChip();
   }
 
+  async function persistHomeView() {
+    if (mode !== "home") return;
+    const id = liveSessionId || selectedId;
+    if (!id || typeof api.replaceHomeMessages !== "function") return;
+    const messages = allMessages
+      .filter((m) => m && !m._streaming && !m._queued)
+      .map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content || m.text || "",
+        attachments: m.attachments || [],
+        images: m.images || [],
+        videos: m.videos || [],
+        createdAt: m.createdAt,
+      }));
+    try {
+      await api.replaceHomeMessages({ id, messages });
+    } catch {
+      /* ignore */
+    }
+  }
+
   async function newChat() {
+    const oldSid = liveSessionId;
+    const wasBusy = Boolean(busy || busySessionId);
+    if (mode === "grok") {
+      detachedBuild = true;
+      busySessionId = null;
+      bags.grok.busy = false;
+      bags.grok.statusPhase = "";
+      bags.grok.statusDetail = "";
+      setBusy(false, "grok");
+      el.statusBar.classList.add("hidden");
+      if (oldSid) delete streamBySession[oldSid];
+      if (wasBusy) {
+        try {
+          await api.chatStop({ mode: "grok" });
+        } catch {
+          /* ignore */
+        }
+        setBusy(false, "grok");
+        busySessionId = null;
+      }
+    }
+
     selectedId = null;
     liveSessionId = null;
     allMessages = [];
@@ -2771,14 +2830,18 @@
     visibleCount = PAGE;
     attachments = [];
     messageQueue = [];
-    bag().wsTitle = "New chat";
+    bag().wsTitle = tr("New chat");
+    bag().busy = false;
+    bag().statusPhase = "";
+    bag().statusDetail = "";
     renderAttachChips();
-    el.wsTitle.textContent = "New chat";
+    el.wsTitle.textContent = tr("New chat");
     updatePathChips(mode === "home" ? "" : defaultCwd);
     pinMessagesBottom(false);
     renderMessages({ forceScroll: true });
     renderList();
     renderActivity();
+    updateQueueChip();
     el.input.focus();
 
     if (mode === "home") {
@@ -2834,7 +2897,7 @@
 
     if (act === "copy") {
       await navigator.clipboard.writeText(id);
-      showToast("ID skopiowane", "ok");
+      showToast(tr("Session ID copied"), "ok");
       return;
     }
     if (act === "unread") {
@@ -2855,7 +2918,7 @@
     }
     if (act === "reveal") {
       if (mode === "home") {
-        showToast("Home chats: ~/Library/Application Support/grok-sessions/home-chats", "");
+        showToast(tr("Home chats are stored in the app data folder"), "");
         return;
       }
       const res = await api.revealSession(row.dirPath);
@@ -2927,7 +2990,7 @@
     if (homeKind === "image") {
       el.input.placeholder = tr("Describe the image… (aspect ratio on the right)");
     } else if (homeKind === "video") {
-      el.input.placeholder = tr("Describe the video… (8 s, takes about a minute)");
+      el.input.placeholder = tr("Describe the video… (takes about a minute)");
     } else {
       el.input.placeholder =
         tr("Message Grok… (Enter = send, ⌘V = paste screenshot)");
@@ -2936,7 +2999,10 @@
 
   document.getElementById("effort-select")?.addEventListener("change", async (e) => {
     effortLevel = e.target.value || "high";
-    const res = await api.chatSetEffort(effortLevel);
+    const res = await api.chatSetEffort({
+      effort: effortLevel,
+      cwd: selectedRow()?.cwd || defaultCwd,
+    });
     if (!res.ok) showToast(res.error || tr("Effort change failed"), "error");
     else showToast(`Effort: ${effortLevel}`, "ok");
   });
@@ -2960,7 +3026,7 @@
     const res = await api.chatStop({ mode });
     setBusy(false);
     if (!res.ok) showToast(res.error || tr("Stop failed"), "error");
-    else showToast("Zatrzymane", "ok");
+    else showToast(tr("Stopped"), "ok");
   };
   el.modelSelect.addEventListener("change", async () => {
     const id = el.modelSelect.value;
@@ -3101,7 +3167,7 @@
   document.getElementById("set-login").onclick = async () => {
     const res = await api.login();
     if (!res.ok) showToast(res.error || tr("Log in did not start"), "error");
-    else showToast("Logowanie otwarte w Terminalu", "ok");
+    else showToast(tr("Log in opened in Terminal"), "ok");
   };
   document.getElementById("set-save").onclick = async () => {
     const theme = document.getElementById("set-theme").value;
@@ -3127,7 +3193,7 @@
     setPrivacyMode(wantPrivacy);
     applyLanguage(wantLang, lastSystemLocale);
     el.settingsModal.classList.add("hidden");
-    showToast("Zapisane", "ok");
+    showToast(tr("Saved"), "ok");
     await refresh();
   };
 
@@ -3141,7 +3207,7 @@
   document.getElementById("account-login").onclick = async () => {
     const res = await api.login();
     if (!res.ok) showToast(res.error || tr("Log in did not start"), "error");
-    else showToast("Logowanie otwarte", "ok");
+    else showToast(tr("Log in opened"), "ok");
   };
 
   window.addEventListener("keydown", (e) => {
@@ -3171,6 +3237,10 @@
     if (evMode === "home") {
       bags.home.busy = Boolean(b);
       if (mode === "home") setBusy(Boolean(b), "home");
+      return;
+    }
+    if (detachedBuild) {
+      if (!b) bags.grok.busy = false;
       return;
     }
     if (b) {
@@ -3588,7 +3658,7 @@
     try {
       await navigator.clipboard.writeText(code.textContent || "");
       const prev = btn.textContent;
-      btn.textContent = "Skopiowane";
+      btn.textContent = tr("Copied");
       setTimeout(() => {
         btn.textContent = prev;
       }, 1200);
