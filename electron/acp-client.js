@@ -4,6 +4,7 @@ const { spawn } = require("child_process");
 const { EventEmitter } = require("events");
 const readline = require("readline");
 const { expandHome } = require("./sessions");
+const { FALLBACK_CHAT_MODEL } = require("./models");
 
 /**
  * Long-lived grok agent stdio ACP client.
@@ -18,7 +19,7 @@ class AcpClient extends EventEmitter {
   } = {}) {
     super();
     this.grokPath = expandHome(grokPath);
-    this.model = model || "grok-4.5";
+    this.model = model || FALLBACK_CHAT_MODEL;
     this.alwaysApprove = alwaysApprove;
     this.reasoningEffort = reasoningEffort || "high";
     this.proc = null;

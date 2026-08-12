@@ -27,8 +27,9 @@
   let homeRows = [];
   let filter = "";
   let defaultCwd = "";
-  let homeModelId = "grok-4.5";
-  let codeModelId = "grok-4.5";
+  let homeModelId = "grok-4.6";
+  let codeModelId = "grok-4.6";
+  let homeModels = [];
   let ctxTargetId = null;
   let drainingQueue = false;
   const PAGE = 60;
@@ -1296,11 +1297,14 @@
     const select = el.modelSelect;
     select.innerHTML = "";
     if (mode === "home") {
-      const opts = [
-        { modelId: "grok-4.5", name: "Grok 4.5" },
-        { modelId: "grok-4.3", name: "Grok 4.3" },
-        { modelId: "grok-imagine-image", name: "Imagine · image" },
-      ];
+      const opts = homeModels.length
+        ? homeModels
+        : [
+            { modelId: "grok-4.6", name: "Grok 4.6" },
+            { modelId: "grok-4.5", name: "Grok 4.5" },
+            { modelId: "grok-4.3", name: "Grok 4.3" },
+            { modelId: "grok-imagine-image", name: "Imagine · image" },
+          ];
       for (const m of opts) {
         const o = document.createElement("option");
         o.value = m.modelId;
@@ -1310,10 +1314,10 @@
       select.value = homeModelId;
     } else {
       const o = document.createElement("option");
-      o.value = codeModelId || "grok-4.5";
-      o.textContent = codeModelId || "Grok 4.5";
+      o.value = codeModelId || "grok-4.6";
+      o.textContent = codeModelId || "Grok 4.6";
       select.appendChild(o);
-      select.value = codeModelId || "grok-4.5";
+      select.value = codeModelId || "grok-4.6";
     }
   }
 
@@ -1325,6 +1329,9 @@
     lastSystemLocale = payload.settings?.systemLocale || lastSystemLocale;
     homeModelId = payload.settings?.homeModelId || homeModelId;
     codeModelId = payload.settings?.modelId || codeModelId;
+    if (payload.homeModels && payload.homeModels.length) {
+      homeModels = payload.homeModels;
+    }
     // busy tylko na jednej sesji Build
     if (payload.busySessionId !== undefined) {
       busySessionId = payload.busySessionId || null;
@@ -3062,6 +3069,8 @@
     document.getElementById("set-cookies").checked = Boolean(s.readBrowserCookies);
     document.getElementById("set-python").value = s.pythonPath || "";
     document.getElementById("set-privacy").checked = Boolean(s.privacyMode);
+    document.getElementById("set-always-latest").checked =
+      s.alwaysLatestModel !== false;
     document.getElementById("set-language").value = s.language || "en";
     el.settingsModal.classList.remove("hidden");
   };
@@ -3101,6 +3110,7 @@
     const wantLang = document.getElementById("set-language").value;
     await api.setSettings({
       privacyMode: wantPrivacy,
+      alwaysLatestModel: document.getElementById("set-always-latest").checked,
       language: wantLang,
       grokPath: document.getElementById("set-grok-path").value.trim(),
       defaultCwd: document.getElementById("set-cwd").value.trim(),

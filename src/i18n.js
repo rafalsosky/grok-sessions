@@ -198,6 +198,8 @@ const PL = {
   "Ask — I approve every tool": "Pytaj — zatwierdzam każde narzędzie",
   "Maximum reply length in Home (tokens)":
     "Maksymalna długość odpowiedzi w Home (tokeny)",
+  "Always use the latest Grok model. When a new version appears, Home and Build switch to it.":
+    "Zawsze używaj najnowszego modelu Grok. Gdy wyjdzie nowa wersja, Home i Build przełączą się same.",
   "Privacy mode — hide name and e-mail in the interface. For screenshots and recordings. Shortcut: ⌘⇧P.":
     "Tryb prywatności — ukryj imię i e-mail w interfejsie. Do zrzutów ekranu i nagrań. Skrót: ⌘⇧P.",
   "Read grok.com cookies from Arc/Chrome (weekly usage %). Requires Python with the rookiepy module. Off by default.":

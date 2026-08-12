@@ -279,7 +279,78 @@ group("settings: walidacja i wartości domyślne");
     assert.strictEqual(saveSettings(dir, { theme: "light" }).theme, "light");
   });
 
+  test("alwaysLatestModel: domyślnie włączony, da się wyłączyć", () => {
+    assert.strictEqual(loadSettings(dir).alwaysLatestModel, true);
+    assert.strictEqual(
+      saveSettings(dir, { alwaysLatestModel: false }).alwaysLatestModel,
+      false
+    );
+    assert.strictEqual(loadSettings(dir).alwaysLatestModel, false);
+    saveSettings(dir, { alwaysLatestModel: true });
+  });
+
   fs.rmSync(dir, { recursive: true, force: true });
+}
+
+/* ── 3b. Lista modeli Home ────────────────────────────────────────────
+   Home nie czyta CLI — woła api.x.ai. Lista musi filtrować eksperymenty
+   i stawiać najwyższy publiczny grok-N.M na górze. */
+group("models: ranking i filtr listy Home");
+{
+  const m = require("../electron/models");
+
+  test("4.6 jest wyżej niż 4.5 i 4.3", () => {
+    const list = m.homeModelsFromApi([
+      { id: "grok-4.3" },
+      { id: "grok-4.6" },
+      { id: "grok-4.5" },
+    ]);
+    assert.deepStrictEqual(
+      list.filter((x) => m.isPublicChatModel(x.modelId)).map((x) => x.modelId),
+      ["grok-4.6", "grok-4.5", "grok-4.3"]
+    );
+  });
+
+  test("wycina 4.20, build i wideo, zostawia Imagine", () => {
+    const list = m.homeModelsFromApi([
+      { id: "grok-4.6" },
+      { id: "grok-4.20-0309-reasoning" },
+      { id: "grok-build-0.1" },
+      { id: "grok-imagine-video-1.5" },
+      { id: "grok-imagine-image" },
+    ]);
+    const ids = list.map((x) => x.modelId);
+    assert.deepStrictEqual(ids, ["grok-4.6", "grok-imagine-image"]);
+  });
+
+  test("puste API = fallback z 4.6 na górze", () => {
+    const list = m.homeModelsFromApi([]);
+    assert.strictEqual(list[0].modelId, "grok-4.6");
+    assert.ok(list.some((x) => x.modelId === "grok-imagine-image"));
+  });
+
+  test("alwaysLatest bierze najwyższy, pin trzyma wybrany", () => {
+    const models = m.homeModelsFromApi([
+      { id: "grok-4.6" },
+      { id: "grok-4.5" },
+    ]);
+    assert.strictEqual(
+      m.resolveChatModelId({
+        alwaysLatest: true,
+        savedId: "grok-4.5",
+        models,
+      }),
+      "grok-4.6"
+    );
+    assert.strictEqual(
+      m.resolveChatModelId({
+        alwaysLatest: false,
+        savedId: "grok-4.5",
+        models,
+      }),
+      "grok-4.5"
+    );
+  });
 }
 
 /* ── 4. Czyszczenie tekstu z markerów załączników ─────────────────────

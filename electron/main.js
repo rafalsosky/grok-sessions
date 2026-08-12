@@ -19,6 +19,7 @@ const { loadAccount } = require("./account");
 const { AcpClient } = require("./acp-client");
 const homeChats = require("./home-chats");
 const xai = require("./xai-api");
+const modelsLib = require("./models");
 const {
   saveBase64,
   importPath,
@@ -44,6 +45,8 @@ const promptBusy = { home: false, grok: false };
 let homeAbort = null;
 /** Oczekujące prośby agenta o zgodę na narzędzie: id → sessionId */
 const pendingPermissions = new Map();
+/** Żywa lista Home z api.x.ai; zanim przyjdzie odpowiedź — fallback. */
+let homeModelsLive = modelsLib.FALLBACK_HOME_MODELS.slice();
 
 function userDataDir() {
   return app.getPath("userData");
@@ -51,6 +54,64 @@ function userDataDir() {
 
 function getSettings() {
   return loadSettings(userDataDir());
+}
+
+function effectiveHomeModelId(settings, modelId) {
+  return modelsLib.resolveChatModelId({
+    alwaysLatest: settings.alwaysLatestModel,
+    savedId: modelId || settings.homeModelId,
+    models: homeModelsLive,
+  });
+}
+
+function effectiveBuildModelId(settings) {
+  const live =
+    acp && acp.models && acp.models.length
+      ? acp.models
+      : modelsLib.FALLBACK_BUILD_MODELS;
+  return modelsLib.resolveChatModelId({
+    alwaysLatest: settings.alwaysLatestModel,
+    savedId: settings.modelId,
+    models: live,
+  });
+}
+
+async function refreshHomeModels() {
+  const settings = getSettings();
+  const token = xai.getAccessToken(settings.grokHome);
+  if (!token) return;
+  try {
+    const raw = await xai.listModels(token);
+    const next = modelsLib.homeModelsFromApi(raw);
+    if (!next.length) return;
+    homeModelsLive = next;
+    if (settings.alwaysLatestModel) {
+      const high = modelsLib.highestChatModelId(next);
+      const patch = {};
+      if (high && settings.homeModelId !== high) patch.homeModelId = high;
+      if (high && settings.modelId !== high) patch.modelId = high;
+      if (Object.keys(patch).length) saveSettings(userDataDir(), patch);
+    }
+    pushSessions(true);
+  } catch {
+    /* zostaje fallback albo poprzednia lista */
+  }
+}
+
+function pinLatestAfterManualPick(modelId, mode) {
+  const settings = getSettings();
+  if (!modelsLib.isPublicChatModel(modelId)) {
+    return { alwaysLatestModel: settings.alwaysLatestModel };
+  }
+  const pool =
+    mode === "home"
+      ? homeModelsLive
+      : acp && acp.models && acp.models.length
+        ? acp.models
+        : modelsLib.FALLBACK_BUILD_MODELS;
+  const highest = modelsLib.highestChatModelId(pool);
+  if (modelId === highest) return { alwaysLatestModel: settings.alwaysLatestModel };
+  return { alwaysLatestModel: false };
 }
 
 function send(channel, payload) {
@@ -184,21 +245,16 @@ function buildListPayload() {
     account,
     models: acp
       ? {
-          currentModelId: acp.currentModelId,
+          currentModelId: settings.alwaysLatestModel
+            ? effectiveBuildModelId(settings)
+            : acp.currentModelId,
           availableModels: acp.models,
         }
       : {
-          currentModelId: settings.modelId || "grok-4.5",
-          availableModels: [
-            { modelId: "grok-4.5", name: "Grok 4.5" },
-            { modelId: "grok-imagine-image", name: "Imagine (image)" },
-          ],
+          currentModelId: effectiveBuildModelId(settings),
+          availableModels: modelsLib.FALLBACK_BUILD_MODELS,
         },
-    homeModels: [
-      { modelId: "grok-4.5", name: "Grok 4.5" },
-      { modelId: "grok-4.3", name: "Grok 4.3" },
-      { modelId: "grok-imagine-image", name: "Imagine · image" },
-    ],
+    homeModels: homeModelsLive,
     settings: {
       grokPath: settings.grokPath,
       grokHome: settings.grokHome,
@@ -206,8 +262,9 @@ function buildListPayload() {
       showSubagents: settings.showSubagents,
       alwaysOpenActive: settings.alwaysOpenActive,
       pollMs: settings.pollMs,
-      modelId: settings.modelId || "grok-4.5",
-      homeModelId: settings.homeModelId || "grok-4.5",
+      modelId: effectiveBuildModelId(settings),
+      homeModelId: effectiveHomeModelId(settings),
+      alwaysLatestModel: settings.alwaysLatestModel !== false,
       lastMode: settings.lastMode || "home",
       lastHomeSessionId: settings.lastHomeSessionId || "",
       lastCodeSessionId: settings.lastCodeSessionId || "",
@@ -313,7 +370,7 @@ async function ensureAcp() {
   if (!acp) {
     acp = new AcpClient({
       grokPath: settings.grokPath,
-      model: settings.modelId || "grok-4.5",
+      model: effectiveBuildModelId(settings),
       // "ask" = agent pyta o narzędzia; wcześniej było zawsze true
       alwaysApprove: settings.permissionMode !== "ask",
       reasoningEffort: settings.effort || "high",
@@ -346,8 +403,25 @@ async function ensureAcp() {
       send("chat:agent-exit", { code });
       pushSessions();
     });
-    acp.on("models", (m) => {
+    acp.on("models", async (m) => {
       send("chat:models", m);
+      const settings = getSettings();
+      if (!settings.alwaysLatestModel) {
+        pushSessions();
+        return;
+      }
+      const high = modelsLib.highestChatModelId(m.availableModels || acp.models);
+      if (high && acp.currentModelId !== high && !acp._switchingLatest) {
+        acp._switchingLatest = true;
+        try {
+          await acp.setModel(high);
+        } catch {
+          /* lista i tak poleci do UI */
+        } finally {
+          acp._switchingLatest = false;
+        }
+      }
+      pushSessions();
     });
   }
   await acp.start();
@@ -484,7 +558,7 @@ async function sendHomeChat({
   }
 
   status("thinking", "Thinking…");
-  const model = modelId || settings.homeModelId || "grok-4.5";
+  const model = effectiveHomeModelId(settings, modelId);
 
   // Build OpenAI-style messages from history.
   // Obrazy jako base64 dołączamy TYLKO do ostatniej wiadomości użytkownika.
@@ -543,7 +617,9 @@ async function sendHomeChat({
     reply = await xai.chatCompletionsStream(
       token,
       {
-        model: model.includes("imagine") ? "grok-4.5" : model,
+        model: model.includes("imagine")
+          ? modelsLib.highestChatModelId(homeModelsLive)
+          : model,
         messages: apiMessages,
         max_tokens: settings.homeMaxTokens || 8192,
         signal,
@@ -562,7 +638,9 @@ async function sendHomeChat({
     if (signal.aborted) throw new Error("Stopped");
     // Awaryjnie bez streamu (np. gdy endpoint nie wspiera SSE)
     const res = await xai.chatCompletions(token, {
-      model: model.includes("imagine") ? "grok-4.5" : model,
+      model: model.includes("imagine")
+        ? modelsLib.highestChatModelId(homeModelsLive)
+        : model,
       messages: apiMessages,
       max_tokens: settings.homeMaxTokens || 8192,
       signal,
@@ -685,9 +763,31 @@ function registerIpc() {
         send("chat:error", { message: err.message });
       }
     }
+    if (
+      partial &&
+      partial.alwaysLatestModel === true &&
+      before.alwaysLatestModel !== true
+    ) {
+      const highHome = modelsLib.highestChatModelId(homeModelsLive);
+      const highBuild = effectiveBuildModelId(next);
+      const patch = {};
+      if (highHome) patch.homeModelId = highHome;
+      if (highBuild) patch.modelId = highBuild;
+      if (Object.keys(patch).length) {
+        saveSettings(userDataDir(), patch);
+      }
+      if (acp && highBuild && acp.currentModelId !== highBuild) {
+        try {
+          await acp.setModel(highBuild);
+        } catch (err) {
+          send("chat:error", { message: err.message });
+        }
+      }
+    }
     startWatchers();
     pushSessions(true);
-    return next;
+    refreshHomeModels().catch(() => {});
+    return getSettings();
   });
 
   ipcMain.handle("session:transcript", async (_e, payload) => {
@@ -863,11 +963,13 @@ function registerIpc() {
     const mode = typeof payload === "object" && payload ? payload.mode : "grok";
     if (!modelId) return { ok: false, error: "No model" };
 
+    const pin = pinLatestAfterManualPick(modelId, mode);
     if (mode === "home") {
-      saveSettings(userDataDir(), { homeModelId: modelId });
+      saveSettings(userDataDir(), { homeModelId: modelId, ...pin });
+      pushSessions(true);
       return { ok: true, mode: "home", modelId };
     }
-    saveSettings(userDataDir(), { modelId });
+    saveSettings(userDataDir(), { modelId, ...pin });
     try {
       const client = await ensureAcp();
       const res = await client.setModel(modelId);
@@ -1129,6 +1231,7 @@ if (!gotLock) {
     applyDockIcon();
     startWatchers();
     setTimeout(pushSessions, 200);
+    refreshHomeModels().catch(() => {});
     ensureAcp().catch((err) => {
       send("chat:error", { message: `Agent: ${err.message}` });
     });

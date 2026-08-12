@@ -7,6 +7,7 @@ const {
   defaultGrokPath,
   expandHome,
 } = require("./sessions");
+const { FALLBACK_CHAT_MODEL } = require("./models");
 
 const DEFAULTS = {
   grokHome: "",
@@ -15,8 +16,9 @@ const DEFAULTS = {
   showSubagents: false,
   alwaysOpenActive: false,
   pollMs: 2000,
-  modelId: "grok-4.5",
-  homeModelId: "grok-4.5",
+  modelId: FALLBACK_CHAT_MODEL,
+  homeModelId: FALLBACK_CHAT_MODEL,
+  alwaysLatestModel: true,
   lastMode: "home",
   lastHomeSessionId: "",
   lastCodeSessionId: "",
@@ -68,8 +70,9 @@ function loadSettings(userDataDir) {
     merged.grokPath = expandHome(merged.grokPath);
   }
   if (!merged.defaultCwd) merged.defaultCwd = require("os").homedir();
-  if (!merged.modelId) merged.modelId = "grok-4.5";
-  if (!merged.homeModelId) merged.homeModelId = "grok-4.5";
+  if (!merged.modelId) merged.modelId = FALLBACK_CHAT_MODEL;
+  if (!merged.homeModelId) merged.homeModelId = FALLBACK_CHAT_MODEL;
+  merged.alwaysLatestModel = raw.alwaysLatestModel !== false;
   if (!merged.lastMode) merged.lastMode = "home";
   if (merged.lastHomeSessionId == null) merged.lastHomeSessionId = "";
   if (merged.lastCodeSessionId == null) merged.lastCodeSessionId = "";
@@ -104,8 +107,9 @@ function saveSettings(userDataDir, partial) {
     showSubagents: Boolean(next.showSubagents),
     alwaysOpenActive: Boolean(next.alwaysOpenActive),
     pollMs: Number(next.pollMs) || 2000,
-    modelId: next.modelId || "grok-4.5",
-    homeModelId: next.homeModelId || "grok-4.5",
+    modelId: next.modelId || FALLBACK_CHAT_MODEL,
+    homeModelId: next.homeModelId || FALLBACK_CHAT_MODEL,
+    alwaysLatestModel: next.alwaysLatestModel !== false,
     lastMode: next.lastMode === "grok" ? "grok" : "home",
     lastHomeSessionId: next.lastHomeSessionId || "",
     lastCodeSessionId: next.lastCodeSessionId || "",
