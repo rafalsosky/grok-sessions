@@ -477,6 +477,15 @@ group("build: New session odłącza bieżącą turę");
     assert.ok(/cwd/.test(fn[0]), "setEffort nie przyjmuje cwd sesji");
   });
 
+  test("setPermissionMode nie wrzuca cwd na homedir", () => {
+    const fn = acp.match(/async setPermissionMode\([\s\S]*?\n  \}/);
+    assert.ok(fn, "brak setPermissionMode");
+    assert.ok(
+      !/homedir\(\)/.test(fn[0]),
+      "Auto/Pytaj nadal ładuje sesję z os.homedir()"
+    );
+  });
+
   test("wideo idzie modelem 1.5", () => {
     assert.ok(
       /grok-imagine-video-1\.5/.test(xai),

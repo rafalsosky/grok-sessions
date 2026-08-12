@@ -2941,7 +2941,7 @@
           liveSessionId = null;
           allMessages = [];
           messages = [];
-          el.wsTitle.textContent = "New chat";
+          el.wsTitle.textContent = tr("New chat");
           renderMessages({ forceScroll: true });
         }
         pushBag();
@@ -2952,9 +2952,9 @@
     }
     if (act === "rename") {
       const name = await modalPrompt({
-        title: "Rename",
+        title: tr("Rename"),
         body: tr("Title in the list"),
-        okLabel: "Save",
+        okLabel: tr("Save"),
         inputValue: row.title,
       });
       if (name == null || !String(name).trim()) return;

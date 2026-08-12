@@ -28,7 +28,7 @@ function buildGrokCommand({ grokPath, cwd, mode, sessionId }) {
     }
     return `cd ${shellQuote(workdir)} && ${shellQuote(bin)} --resume ${shellQuote(sessionId)} --cwd ${shellQuote(workdir)}`;
   }
-  throw new Error(`Nieznany tryb launch: ${mode}`);
+  throw new Error(`Unknown launch mode: ${mode}`);
 }
 
 function applescriptEscape(s) {

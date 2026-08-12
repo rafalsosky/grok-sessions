@@ -778,7 +778,9 @@ function registerIpc() {
       acp
     ) {
       try {
-        await acp.setPermissionMode(partial.permissionMode);
+        await acp.setPermissionMode(partial.permissionMode, {
+          cwd: next.defaultCwd,
+        });
       } catch (err) {
         send("chat:error", { message: err.message });
       }

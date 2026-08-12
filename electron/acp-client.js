@@ -189,16 +189,18 @@ class AcpClient extends EventEmitter {
   }
 
   /** Zmiana trybu uprawnień wymaga restartu procesu (flaga CLI). */
-  async setPermissionMode(mode) {
+  async setPermissionMode(mode, { cwd } = {}) {
     const next = mode === "ask" ? false : true;
     if (this.alwaysApprove === next) return { ok: true, changed: false };
     this.alwaysApprove = next;
+    if (cwd) this.cwd = cwd;
     const sid = this.sessionId;
+    const workCwd = this.cwd;
     await this.stop();
     await this.start();
     if (sid) {
       try {
-        await this.ensureSession({ sessionId: sid, cwd: require("os").homedir() });
+        await this.ensureSession({ sessionId: sid, cwd: workCwd });
       } catch {
         /* nowa sesja, gdy load nie wyjdzie */
       }
