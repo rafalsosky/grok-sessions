@@ -6,6 +6,7 @@
    * narzędziach. Brak i18n = angielski, czyli tekst źródłowy.
    */
   const tr = (window.tr || ((s) => s));
+  const chatHistory = window.chatHistory || {};
   const i18n = window.i18n || {
     setLang: () => "en",
     resolveLang: () => "en",
@@ -664,6 +665,13 @@
   /** True podczas programowego scrolla — handler nie gasi stickToBottom. */
   let scrollingProgrammatically = false;
   let scrollBottomTimer = 0;
+  /** Po otwarciu sesji / Enter ignoruj fałszywe „user scrolled up”. */
+  let holdStickUntil = 0;
+
+  function holdStick(ms) {
+    stickToBottom = true;
+    holdStickUntil = Date.now() + (Number(ms) || 0);
+  }
 
   function nearBottom(threshold = 120) {
     const box = el.chatScroll;
@@ -765,6 +773,10 @@
       "scroll",
       () => {
         if (scrollingProgrammatically) return;
+        if (Date.now() < holdStickUntil) {
+          stickToBottom = true;
+          return;
+        }
         // blisko dołu → znowu follow; wyżej → nie ruszaj
         stickToBottom = nearBottom(80);
       },
@@ -1079,15 +1091,21 @@
       msgs.style.paddingTop = "";
       return;
     }
-    // zmierz treść bez sztucznego paddingu
-    msgs.style.paddingTop = "0px";
+    const currentPad = parseFloat(msgs.style.paddingTop) || 0;
     const cs = getComputedStyle(box);
     const padY =
       (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
     const available = Math.max(0, box.clientHeight - padY);
-    const contentH = msgs.scrollHeight;
-    const gap = Math.floor(available - contentH);
-    msgs.style.paddingTop = gap > 1 ? `${gap}px` : "0px";
+    const measure = chatHistory.contentHeightWithoutPad || ((h, p) => h - p);
+    const nextPadFn = chatHistory.nextChatPadding || ((a, c) => (a - c > 1 ? a - c : 0));
+    const contentH = measure(msgs.scrollHeight, currentPad);
+    const nextPad = nextPadFn(available, contentH);
+    if (Math.abs(nextPad - currentPad) > 1) {
+      msgs.style.paddingTop = nextPad ? `${nextPad}px` : "0px";
+    }
+    if (stickToBottom) {
+      box.scrollTop = Math.max(0, box.scrollHeight - box.clientHeight);
+    }
   }
 
   function pinMessagesBottom(on) {
@@ -1494,16 +1512,12 @@
       return;
     }
 
-    // Obca sesja (albo bez pracy) — ZAWSZE czysty chrome + transcript
+    // Obca sesja (albo bez pracy) — transkrypt bez wipe przed await
     streamingAssistant = null;
     liveTools = [];
     messageQueue = [];
     clearForeignSessionChrome();
     visibleCount = PAGE;
-
-    allMessages = [];
-    messages = [];
-    renderMessages({ forceScroll: true });
     renderActivity();
 
     const tr = await api.transcript({
@@ -1515,7 +1529,7 @@
     if (selectedId !== row.id) return;
 
     if (tr.error) showToast(tr.error, "error");
-    allMessages = (tr.messages || [])
+    const mapped = (tr.messages || [])
       .map((m, i) => {
         const raw = m.text || m.content || "";
         let text =
@@ -1556,9 +1570,16 @@
         return true;
       });
     // odfiltruj „żywe” śmieci z cudzego streamu (gdyby transcript miał puste thinking shells)
-    allMessages = allMessages.filter(
+    const cleaned = mapped.filter(
       (m) => !(m._streaming && m.role === "assistant" && !m.text)
     );
+    const merge =
+      chatHistory.mergeTranscriptWithLocals || ((a, b) => a.concat(b || []));
+    const extras = allMessages.filter(
+      (m) => (m._local || m._streaming) && m._sid === row.id
+    );
+    allMessages = merge(cleaned, extras);
+    holdStick(1200);
     syncVisibleMessages();
     renderMessages({ forceScroll: true });
     // Wznowiona sesja: markdown i obrazy dorastają jeszcze przez chwilę po
@@ -2530,6 +2551,7 @@
           tools: [],
           attachments: atts || [],
           _local: true,
+          _sid: selectedId || liveSessionId || null,
           _ts: Date.now(),
         };
         pushAll(userMsg);
@@ -2544,6 +2566,7 @@
       tools: [],
       thinking: "",
       _streaming: true,
+      _sid: selectedId || liveSessionId || null,
     };
     pushAll(streamingAssistant);
     toAppend.push(streamingAssistant);
@@ -2555,6 +2578,7 @@
     autosize();
     // Enter: NIE wipe'uj DOM (replaceChildren = scrollTop→0 = skok w górę).
     // Tylko doklej nowe bańki na koniec + force scroll na dół.
+    holdStick(1500);
     stickToBottom = true;
     visibleCount = Math.max(visibleCount, allMessages.length, PAGE);
     syncVisibleMessages();

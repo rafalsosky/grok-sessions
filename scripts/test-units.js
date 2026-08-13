@@ -522,6 +522,51 @@ group("build: New session odłącza bieżącą turę");
   });
 }
 
+/* ── 3e. Otwarcie sesji z historią: nowa wiadomość na dole ─────────────
+   layoutChatBottom zerował paddingTop przed pomiarem, więc scrollTop
+   zostawał na górze ostatniej strony historii. Transkrypt nadpisywał
+   bańkę wysłaną w trakcie ładowania. */
+group("chat-history: dół sesji i merge po transkrypcie");
+{
+  const ch = require("../src/chat-history");
+
+  test("padding liczy się bez zerowania aktualnego paddingu", () => {
+    assert.strictEqual(ch.nextChatPadding(800, 200), 600);
+    assert.strictEqual(ch.nextChatPadding(800, 900), 0);
+    assert.strictEqual(ch.contentHeightWithoutPad(500, 120), 380);
+  });
+
+  test("transkrypt nie zjada lokalnie wysłanej bańki", () => {
+    const mapped = [
+      { role: "user", text: "stare" },
+      { role: "assistant", text: "Sprawdzę…" },
+    ];
+    const current = [
+      { role: "user", text: "stare" },
+      { role: "assistant", text: "Sprawdzę…" },
+      { role: "user", text: "nowe pytanie", _local: true },
+      { role: "assistant", text: "", _streaming: true },
+    ];
+    const out = ch.mergeTranscriptWithLocals(mapped, current);
+    assert.strictEqual(out[out.length - 2].text, "nowe pytanie");
+    assert.strictEqual(out[out.length - 1]._streaming, true);
+  });
+
+  test("openSession nie czyści allMessages przed transkryptem", () => {
+    const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+    const fn = app.match(/async function openSession\([\s\S]*?\n  \}/);
+    assert.ok(fn, "brak openSession");
+    assert.ok(
+      /mergeTranscriptWithLocals/.test(fn[0]),
+      "openSession nie scala lokalnych baniek z transkryptem"
+    );
+    assert.ok(
+      !/allMessages = \[\];\s*messages = \[\];\s*renderMessages/.test(fn[0]),
+      "openSession nadal wipe'uje czat przed await transcript"
+    );
+  });
+}
+
 /* ── 4. Czyszczenie tekstu z markerów załączników ─────────────────────
    Regex miał zaszytą nazwę użytkownika (/Users/sosky/), więc u kogokolwiek
    innego nie działał. */

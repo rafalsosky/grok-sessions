@@ -574,6 +574,11 @@ select {
   flex-shrink: 0;
 }
 
+/* ostatnia bańka trzyma dół przy zmianie wysokości (markdown, obraz) */
+.messages > .msg:last-child {
+  overflow-anchor: auto;
+}
+
 .home-hero {
   max-width: 680px;
   margin: 56px auto 28px;
