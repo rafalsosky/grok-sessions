@@ -22,3 +22,6 @@ settings.json
 session-flags.json
 home-chats/
 attachments/
+
+# artefakt hooka design-review, nie kod
+.impeccable/

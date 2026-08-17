@@ -63,12 +63,103 @@ function loadActiveMap(grokHome) {
   return map;
 }
 
-function titleFromSummary(summary) {
+/**
+ * Pierwsze zdanie użytkownika z updates.jsonl — zastępczy tytuł, dopóki agent
+ * nie wygeneruje swojego. Bez tego nowa sesja stała na liście przez minutę
+ * jako „01a00e99” i nie dało się jej znaleźć.
+ * Czytamy tylko początek pliku: świeża sesja ma go małego, a przy starej i tak
+ * jest już prawdziwy tytuł i tu nie wchodzimy.
+ */
+const TITLE_SCAN_BYTES = 256 * 1024;
+
+function shortTitle(s) {
+  const t = String(s || "")
+    .replace(/<<<GROK_SESSIONS_ATTACHMENTS>>>[\s\S]*/i, "")
+    .replace(/\[Injected mid-work[^\]]*\]/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (t.length < 2) return "";
+  return t.length > 48 ? t.slice(0, 47).trimEnd() + "…" : t;
+}
+
+function readHead(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const buf = Buffer.alloc(TITLE_SCAN_BYTES);
+    const read = fs.readSync(fd, buf, 0, TITLE_SCAN_BYTES, 0);
+    return buf.slice(0, read).toString("utf8");
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/** Sesja odpalona z terminala nie ma user_message_chunk — prompt siedzi
+ *  w chat_history.jsonl w tagu <user_query>. */
+function firstQueryFromHistory(dirPath) {
+  const raw = readHead(path.join(dirPath, "chat_history.jsonl"));
+  if (!raw) return "";
+  const m = raw.match(/<user_query>\\n([\s\S]*?)\\n<\/user_query>/);
+  if (!m) return "";
+  try {
+    return shortTitle(JSON.parse('"' + m[1].replace(/"/g, '\\"') + '"'));
+  } catch {
+    return shortTitle(m[1].replace(/\\n/g, " "));
+  }
+}
+
+function firstUserLine(dirPath) {
+  if (!dirPath) return "";
+  const file = path.join(dirPath, "updates.jsonl");
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const buf = Buffer.alloc(TITLE_SCAN_BYTES);
+    const read = fs.readSync(fd, buf, 0, TITLE_SCAN_BYTES, 0);
+    const raw = buf.slice(0, read).toString("utf8");
+    for (const line of raw.split("\n")) {
+      if (!line.includes("user_message_chunk")) continue;
+      let o;
+      try {
+        o = JSON.parse(line);
+      } catch {
+        continue; // ostatnia linia bywa ucięta na granicy odczytu
+      }
+      const u = (o.params && o.params.update) || o.update || {};
+      if (u.sessionUpdate !== "user_message_chunk") continue;
+      const t = shortTitle((u.content && u.content.text) || "");
+      if (t) return t;
+    }
+    return firstQueryFromHistory(dirPath);
+  } catch {
+    return firstQueryFromHistory(dirPath);
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+function titleFromSummary(summary, dirPath) {
   const t =
     (summary.session_summary && String(summary.session_summary).trim()) ||
     (summary.generated_title && String(summary.generated_title).trim()) ||
     "";
   if (t) return t;
+  const fromUser = firstUserLine(dirPath);
+  if (fromUser) return fromUser;
   const id = summary?.info?.id || "";
   return id ? id.slice(0, 8) : "(untitled)";
 }
@@ -139,7 +230,7 @@ function scanSessions(options = {}) {
       rows.push({
         id,
         cwd: summary.info.cwd || "",
-        title: titleFromSummary(summary),
+        title: titleFromSummary(summary, dirPath),
         modelId: summary.current_model_id || null,
         createdAt: summary.created_at || null,
         updatedAt: summary.updated_at || null,
@@ -186,6 +277,8 @@ function authPresent(grokHome) {
 
 module.exports = {
   UUID_RE,
+  titleFromSummary,
+  firstUserLine,
   expandHome,
   resolveGrokHome,
   defaultGrokPath,

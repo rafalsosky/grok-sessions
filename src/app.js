@@ -856,6 +856,37 @@
       },
       { passive: true }
     );
+    // Gest użytkownika jest jednoznaczny — puszczamy dół NATYCHMIAST, bez
+    // oglądania się na flagę „to my scrollujemy”. Podczas streamu ResizeObserver
+    // trzymał tę flagę prawie bez przerwy, więc event `scroll` od kółka był
+    // zjadany i widok wracał na dół: nie dało się czytać od góry, gdy Grok pisze.
+    const releaseOnGesture = (e) => {
+      if (e.type === "keydown") {
+        const k = e.key;
+        const nav =
+          k === "PageUp" || k === "PageDown" || k === "Home" || k === "End" ||
+          k === "ArrowUp" || k === "ArrowDown";
+        if (!nav || e.target === el.input) return;
+        if (k === "End" || k === "PageDown" || k === "ArrowDown") {
+          if (isNearBottomNow()) return;
+        }
+      }
+      if (e.type !== "keydown" && e.type !== "touchmove") {
+        // kółko/gładzik w dół przy samym dole = user chce zostać przy dole
+        if (e.deltaY > 0 && isNearBottomNow()) return;
+      }
+      scrollingProgrammatically = false;
+      scroller.release();
+      stickToBottom = false;
+    };
+    const isNearBottomNow = () => {
+      const b = el.chatScroll;
+      return b ? b.scrollHeight - b.scrollTop - b.clientHeight < 40 : true;
+    };
+    box.addEventListener("wheel", releaseOnGesture, { passive: true });
+    box.addEventListener("touchmove", releaseOnGesture, { passive: true });
+    box.addEventListener("keydown", releaseOnGesture);
+    document.addEventListener("keydown", releaseOnGesture);
     // BUG (naprawiony): obserwowany był #chat-scroll, czyli kontener o stałej
     // wysokości. Gdy rosła TREŚĆ (markdown, tabele, obrazy z readPreview,
     // fonty), nic się nie przeliczało i widok zostawał w połowie historii,
@@ -997,21 +1028,12 @@
     label.textContent = m.role === "user" ? "You" : "Grok";
     body.appendChild(label);
 
-    if (m.thinking && mode === "grok") {
-      const pill = document.createElement("div");
-      pill.className =
-        "agent-work-summary" + (m._streaming && busy ? " live" : "");
-      pill.textContent =
-        m._streaming && busy ? "Thinking…" : tr("Thinking (hidden in chat)");
-      body.appendChild(pill);
-    }
-
-    if (mode === "grok" && m.tools && m.tools.length) {
-      const active = m.tools.filter(
+    // JEDEN chip nad bańką. Na skończonej turze pokazuje CO agent zrobił
+    // („Read 11 files, ran 12 commands”), jak u Claude — nie „Thinking”.
+    if (mode === "grok" && ((m.tools && m.tools.length) || m.thinking)) {
+      const tools = m.tools || [];
+      const active = tools.filter(
         (t) => t.status !== "completed" && t.status !== "failed"
-      );
-      const done = m.tools.filter(
-        (t) => t.status === "completed" || t.status === "failed"
       );
       const pill = document.createElement("div");
       pill.className = "agent-work-summary" + (active.length ? " live" : "");
@@ -1021,9 +1043,12 @@
           active.length > 1 ? ` +${active.length - 1}` : ""
         }`;
       } else {
-        pill.textContent = `${done.length} ${tr("background steps (hidden) · see „Steps”")}`;
+        const sum =
+          (window.workSummary && window.workSummary.summarizeTools(tools)) || "";
+        // sama warstwa myślenia bez narzędzi → pusty chip, nie „Thinking”
+        pill.textContent = sum || (m._streaming && busy ? "Thinking…" : "");
       }
-      body.appendChild(pill);
+      if (pill.textContent) body.appendChild(pill);
     }
 
     if (m.attachments && m.attachments.length) {
@@ -1648,7 +1673,12 @@
     streamingAssistant = null;
     liveTools = [];
     livePlan = [];
-    messageQueue = [];
+    // Kolejka należy do SESJI, nie do okna. Zerowanie jej tutaj kasowało
+    // dopowiedzenia napisane w A, gdy user zajrzał do B i wrócił.
+    messageQueue = (
+      (streamBySession[row.id] && streamBySession[row.id].messageQueue) ||
+      []
+    ).slice();
     clearForeignSessionChrome();
     visibleCount = PAGE;
     renderActivity();
@@ -1728,6 +1758,7 @@
     pushBag();
     persistNav();
 
+    updateQueueChip();
     if (isSessionBusy(row.id)) {
       setBusy(true, mode);
     } else {
@@ -2815,6 +2846,7 @@
     const cwd = selectedRow()?.cwd || defaultCwd;
     if (mode === "grok") detachedBuild = false;
     const sessionId = liveSessionId || selectedId || null;
+    const turnMode = mode;
     pendingNewSession = mode === "grok" && !sessionId;
     const displayText = cleanUserText(text); // bez markerów / „Wstrzyknieto…”
 
@@ -2897,6 +2929,9 @@
       _streaming: true,
       _sid: selectedId || liveSessionId || null,
     };
+    // Bańka TEJ tury. Po await user może już oglądać inną sesję i moduł
+    // `streamingAssistant` będzie wtedy wskazywał na cudzy stream.
+    const turnAssistant = streamingAssistant;
     pushAll(streamingAssistant);
     toAppend.push(streamingAssistant);
     liveTools = [];
@@ -2949,18 +2984,37 @@
       effort: mode === "grok" ? effortLevel : undefined,
     });
 
+    // Tura tej sesji się skończyła. Ale user mógł przez ten czas przełączyć
+    // kartę — wtedy WIDOK należy do innej sesji i nie wolno go dotykać.
+    // Bez tego koniec tury A przestawiał selectedId/liveSessionId na A,
+    // gasił busy sesji B i domykał bańkę B: „ten sam czat w dwóch kartach”.
+    const doneSid = (res && res.ok && res.sessionId) || sessionId || null;
+    if (turnAssistant) turnAssistant._streaming = false;
+    setSessionBusy(doneSid, false);
+
+    const stillViewing =
+      turnMode === mode && (turnMode !== "grok" || isViewingSession(doneSid));
+    if (!stillViewing) {
+      if (doneSid) {
+        const buf = ensureSessionStream(doneSid);
+        if (buf) {
+          if (buf.streamingAssistant) buf.streamingAssistant._streaming = false;
+          buf.streamingAssistant = null;
+          buf.statusPhase = res.ok ? "done" : "error";
+          buf.statusDetail = res.ok ? "" : String(res.error || "").slice(0, 120);
+        }
+      }
+      if (!res.ok) showToast(res.error || tr("Send failed"), "error");
+      await refresh();
+      if (typeof refreshUsage === "function") refreshUsage();
+      return;
+    }
+
     // posprzątaj echa które weszły mimo bramek
     dedupeTrailingUserMessages();
-    if (res.ok && res.sessionId) {
-      // domknij stream tej sesji w buforze
-      const doneSid = res.sessionId;
-      if (streamBySession[doneSid] && streamingAssistant) {
-        streamingAssistant._streaming = false;
-        snapshotCurrentBuildSession();
-      }
-      // po zakończeniu zostaw snapshot do momentu przeładowania transcriptu
+    if (res.ok && res.sessionId && streamBySession[res.sessionId]) {
+      snapshotCurrentBuildSession();
     }
-    setSessionBusy(res.sessionId || sessionId, false);
     setBusy(false);
     if (!res.ok) {
       showToast(res.error || tr("Send failed"), "error");
@@ -2971,23 +3025,25 @@
       return;
     }
 
-    liveSessionId = res.sessionId;
-    selectedId = res.sessionId;
-    if (streamingAssistant) streamingAssistant._streaming = false;
+    if (res.sessionId) {
+      liveSessionId = res.sessionId;
+      selectedId = res.sessionId;
+    }
+    if (turnAssistant) turnAssistant._streaming = false;
 
     if (mode === "home" && res.assistant) {
-      if (streamingAssistant) {
-        streamingAssistant.text = res.assistant.content || "";
-        streamingAssistant.images = res.assistant.images || [];
-        streamingAssistant.videos = res.assistant.videos || [];
-        streamingAssistant._streaming = false;
+      if (turnAssistant) {
+        turnAssistant.text = res.assistant.content || "";
+        turnAssistant.images = res.assistant.images || [];
+        turnAssistant.videos = res.assistant.videos || [];
+        turnAssistant._streaming = false;
         // podmień ostatnią bańkę asystenta bez wipe
         const lastRow = el.messages.lastElementChild;
         if (lastRow && lastRow.classList.contains("assistant")) {
-          lastRow.replaceWith(buildMessageRow(streamingAssistant));
+          lastRow.replaceWith(buildMessageRow(turnAssistant));
           scrollChatToBottom(true);
         } else {
-          appendMessageRows([streamingAssistant], { stick: true });
+          appendMessageRows([turnAssistant], { stick: true });
         }
       } else {
         const msg = {
@@ -3018,7 +3074,7 @@
       el.input.focus();
     }
     if (typeof refreshUsage === "function") refreshUsage();
-    if (streamingAssistant) streamingAssistant._streaming = false;
+    if (turnAssistant) turnAssistant._streaming = false;
     await drainQueue();
   }
 

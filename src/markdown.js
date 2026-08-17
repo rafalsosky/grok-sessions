@@ -133,6 +133,14 @@ function renderTable(block) {
   );
 }
 
+/** Znacznik twardego łamania — wstawiany PRZED escapowaniem, więc nie może
+ *  być gotowym "<br>" (zamieniłoby się na &lt;br&gt;). */
+const BR = "\u0001";
+
+function inlineFormatKeepBr(s) {
+  return inlineFormat(s).split(BR).join("<br>");
+}
+
 function inlineFormat(s) {
   let t = escapeHtml(s);
   t = t.replace(/`([^`]+)`/g, '<code class="md-inline">$1</code>');
@@ -257,38 +265,53 @@ function renderMarkdown(src) {
       continue;
     }
 
-    // Unordered list
-    if (/^[-*]\s+/.test(trimmed)) {
+    // Listy. Wcięta linia pod punktem to CIĄG DALSZY tego punktu — wcześniej
+    // wypadała z listy jako osobny akapit i lista rozpadała się na wyspy.
+    const collectList = (marker) => {
       const items = [];
-      while (i < lines.length && /^[-*]\s+/.test(lines[i].trim())) {
-        items.push(lines[i].trim().replace(/^[-*]\s+/, ""));
-        i++;
+      while (i < lines.length) {
+        const raw = lines[i];
+        const t = raw.trim();
+        if (marker.test(t)) {
+          items.push(t.replace(marker, ""));
+          i++;
+          continue;
+        }
+        if (items.length && t && /^\s{2,}\S/.test(raw)) {
+          items[items.length - 1] += BR + t;
+          i++;
+          continue;
+        }
+        break;
       }
+      return items;
+    };
+
+    if (/^[-*]\s+/.test(trimmed)) {
+      const items = collectList(/^[-*]\s+/);
       out.push(
         "<ul class=\"md-ul\">" +
-          items.map((it) => `<li>${inlineFormat(it)}</li>`).join("") +
+          items.map((it) => `<li>${inlineFormatKeepBr(it)}</li>`).join("") +
           "</ul>"
       );
       continue;
     }
 
-    // Ordered list
     if (/^\d+\.\s+/.test(trimmed)) {
-      const items = [];
-      while (i < lines.length && /^\d+\.\s+/.test(lines[i].trim())) {
-        items.push(lines[i].trim().replace(/^\d+\.\s+/, ""));
-        i++;
-      }
+      const items = collectList(/^\d+\.\s+/);
       out.push(
         "<ol class=\"md-ol\">" +
-          items.map((it) => `<li>${inlineFormat(it)}</li>`).join("") +
+          items.map((it) => `<li>${inlineFormatKeepBr(it)}</li>`).join("") +
           "</ol>"
       );
       continue;
     }
 
-    // Paragraph (collect until blank / special)
+    // Paragraph (collect until blank / special).
+    // „linia  \nnastępna” (dwie spacje = twardy łamacz GFM) zostaje łamana,
+    // reszta zdań scala się w JEDEN akapit — gęstość jak u Claude.
     const para = [];
+    const hardBreak = [];
     while (
       i < lines.length &&
       lines[i].trim() &&
@@ -301,11 +324,16 @@ function renderMarkdown(src) {
         lines[i].indexOf("|") !== lines[i].lastIndexOf("|")
       )
     ) {
+      hardBreak.push(/ {2,}$/.test(lines[i]));
       para.push(lines[i].trim());
       i++;
     }
     if (para.length) {
-      out.push(`<p>${inlineFormat(para.join(" "))}</p>`);
+      const joined = para.reduce(
+        (acc, ln, k) => (k === 0 ? ln : acc + (hardBreak[k - 1] ? BR : " ") + ln),
+        ""
+      );
+      out.push(`<p>${inlineFormatKeepBr(joined)}</p>`);
     }
   }
 

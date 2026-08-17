@@ -950,15 +950,18 @@ select {
   word-break: break-all;
 }
 
+/* Widoczne od razu, nie po najechaniu. Kopiowanie odpowiedzi było ukryte
+   pod hoverem i trzeba było zaznaczać tekst myszą. */
 .msg-actions {
-  opacity: 0;
+  opacity: 0.5;
   display: flex;
   gap: 4px;
   margin-top: 6px;
   transition: opacity 0.12s;
 }
 
-.msg:hover .msg-actions {
+.msg:hover .msg-actions,
+.msg-actions:focus-within {
   opacity: 1;
 }
 

@@ -1039,6 +1039,111 @@ group("chat-scroll: user na górze zostaje na górze");
   });
 }
 
+/* ── 7b. Tura należy do SWOJEJ sesji ──────────────────────────────────
+   17.08: `runSendTurn` czekał na koniec tury, a potem — już po `await` —
+   przestawiał selectedId/liveSessionId, gasił busy i domykał bańkę na tym,
+   co akurat było otwarte. Koniec tury A robił to sesji B: ten sam tekst
+   w dwóch kartach, „working” na obu, wiadomość usera lądująca w środku. */
+group("send: koniec tury A nie rusza widoku sesji B");
+{
+  const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+  const fn = app.match(/async function runSendTurn\([\s\S]*?\n  \}\n/);
+  test("runSendTurn trzyma własną bańkę tury", () => {
+    assert.ok(fn, "brak runSendTurn");
+    assert.ok(
+      /const turnAssistant = streamingAssistant/.test(fn[0]),
+      "tura nie zapamiętuje swojej bańki — po await zamknie cudzą"
+    );
+  });
+  test("po await widok zmienia się tylko gdy to nadal ta sesja", () => {
+    assert.ok(/const stillViewing =/.test(fn[0]), "brak bramki stillViewing");
+    const tail = fn[0].slice(fn[0].indexOf("const stillViewing"));
+    assert.ok(
+      /if \(!stillViewing\)[\s\S]*?return;/.test(tail),
+      "brak wyjścia dla sesji, której już nie oglądamy"
+    );
+    const guard = tail.slice(0, tail.indexOf("return;"));
+    assert.ok(
+      !/selectedId =|liveSessionId =/.test(guard),
+      "gałąź „już nie oglądam” nadal przestawia selectedId/liveSessionId"
+    );
+  });
+  test("selectedId i liveSessionId nie rozjeżdżają się po turze", () => {
+    const set = fn[0].match(/liveSessionId = res\.sessionId;\s*\n\s*selectedId = res\.sessionId;/);
+    assert.ok(set, "id sesji ustawiane osobno — dwie karty na liście jako 'selected'");
+  });
+  test("gest użytkownika zdejmuje trzymanie dołu od razu", () => {
+    assert.ok(
+      /addEventListener\("wheel"/.test(app) && /scroller\.release\(\)/.test(app),
+      "kółko myszy nie zwalnia stick — nie da się czytać, gdy agent pisze"
+    );
+  });
+}
+
+/* ── 7c. Tytuł nowej sesji od pierwszej wiadomości ────────────────────── */
+group("sessions: nowa sesja nie stoi na liście jako uuid");
+{
+  const sessions = require("../electron/sessions");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sess-title-"));
+  fs.writeFileSync(
+    path.join(dir, "updates.jsonl"),
+    JSON.stringify({
+      method: "session/update",
+      params: {
+        sessionId: "x",
+        update: {
+          sessionUpdate: "user_message_chunk",
+          content: { type: "text", text: "sprawdź czemu scroll ucieka na dół" },
+        },
+      },
+    }) + "\n"
+  );
+  test("tytuł bierze się z pierwszej wiadomości, nie z id", () => {
+    const t = sessions.titleFromSummary(
+      { info: { id: "01a00e99-1111-2222-3333-444444444444" } },
+      dir
+    );
+    assert.strictEqual(t, "sprawdź czemu scroll ucieka na dół");
+  });
+  test("prawdziwy tytuł agenta wygrywa z zastępczym", () => {
+    const t = sessions.titleFromSummary(
+      { info: { id: "01a00e99" }, generated_title: "Fix session UI" },
+      dir
+    );
+    assert.strictEqual(t, "Fix session UI");
+  });
+  test("brak pliku = brak wybuchu", () => {
+    const t = sessions.titleFromSummary(
+      { info: { id: "01a00e99-1111-2222-3333-444444444444" } },
+      path.join(dir, "nie-ma")
+    );
+    assert.strictEqual(t, "01a00e99");
+  });
+}
+
+/* ── 7d. Gęstość i struktura markdownu ────────────────────────────────── */
+group("markdown: struktura jak w źródle, nie sitko akapitów");
+{
+  const { renderMarkdown } = require("../src/markdown.js");
+  test("twardy łamacz GFM (dwie spacje) daje <br>, nie nowy akapit", () => {
+    const out = renderMarkdown("Repo: `a`  \nGałąź: `main`  \nHEAD: `632be50`");
+    assert.strictEqual((out.match(/<p>/g) || []).length, 1, out);
+    assert.strictEqual((out.match(/<br>/g) || []).length, 2, out);
+  });
+  test("wcięta linia zostaje w punkcie listy", () => {
+    const out = renderMarkdown(
+      "1. `94bfbff` — kolejka  \n   `src/app.js`, `src/styles.css`\n2. `02de77c` — pierwsza wiadomość"
+    );
+    assert.strictEqual((out.match(/<li>/g) || []).length, 2, out);
+    assert.ok(!/<p>/.test(out), "ciąg dalszy punktu wypadł z listy: " + out);
+  });
+  test("łamacz nie przemyca HTML-a", () => {
+    const out = renderMarkdown("a  \n<img src=x onerror=alert(1)>");
+    assert.ok(!out.includes("<img"), out);
+    assert.ok(out.includes("<br>"), out);
+  });
+}
+
 /* ── 8. Pobieranie wygenerowanych plików ──────────────────────────────
    Obrazy i wideo z imgen/vidgen.x.ai potrafią urwać się w połowie
    transferu. Krótki plik udający wynik jest gorszy niż błąd, bo pieniądze
