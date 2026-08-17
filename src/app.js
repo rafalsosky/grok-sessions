@@ -1567,6 +1567,25 @@
    */
   const localTitles = Object.create(null);
 
+  /**
+   * Numer wersji widoku. Rośnie przy KAŻDEJ zmianie tego, co jest otwarte.
+   * Wyścig, który to łapie: nowa sesja A wysłana, po sekundzie New session i
+   * nowa sesja B. Sid dla A przychodzi DOPIERO teraz — a stary kod widział
+   * tylko globalne `pendingNewSession` i przygarniał sidem A widok, w którym
+   * siedzi już bańka usera z B. Pytanie z B lądowało w czacie A.
+   */
+  let viewEpoch = 0;
+  let pendingNewEpoch = -1;
+
+  function bumpViewEpoch() {
+    viewEpoch++;
+  }
+
+  /** Czy ten widok wciąż czeka na sid SWOJEJ nowej sesji. */
+  function awaitingOwnNewSession() {
+    return pendingNewSession && pendingNewEpoch === viewEpoch;
+  }
+
   function rememberLocalTitle(sid) {
     if (!sid || localTitles[sid]) return;
     const first = allMessages.find(
@@ -1625,7 +1644,7 @@
       stampSessionId(sid);
       return;
     }
-    if (!pendingNewSession) return;
+    if (!awaitingOwnNewSession()) return;
     if (selectedId && selectedId !== sid) return;
     if (streamBySession[sid] && liveSessionId !== sid) return;
     selectedId = sid;
@@ -1644,7 +1663,7 @@
     if (mode !== "grok") return false;
     if (selectedId === sid || liveSessionId === sid) return true;
     // Nowy czat: bierzemy tylko sid, którego jeszcze nie ma inna karta
-    if (pendingNewSession && !selectedId && !streamBySession[sid]) return true;
+    if (awaitingOwnNewSession() && !selectedId && !streamBySession[sid]) return true;
     return false;
   }
 
@@ -1663,6 +1682,7 @@
   }
 
   async function openSession(row, opts = {}) {
+    bumpViewEpoch();
     detachedBuild = false;
     if (mode === "grok" && liveSessionId && liveSessionId !== row.id) {
       snapshotCurrentBuildSession();
@@ -2906,6 +2926,7 @@
     const sessionId = liveSessionId || selectedId || null;
     const turnMode = mode;
     pendingNewSession = mode === "grok" && !sessionId;
+    if (pendingNewSession) pendingNewEpoch = viewEpoch;
     const displayText = cleanUserText(text); // bez markerów / „Wstrzyknieto…”
 
     // Znajdź bańkę z kolejki do reuse (nie klonuj po wysłaniu)
@@ -3238,6 +3259,7 @@
   }
 
   async function newChat() {
+    bumpViewEpoch();
     const wasBusy = Boolean(busy || isSessionBusy(liveSessionId));
     if (mode === "grok") {
       if (liveSessionId) snapshotCurrentBuildSession();

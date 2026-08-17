@@ -845,13 +845,30 @@ group("chat-history: dół sesji i merge po transkrypcie");
     assert.ok(/pendingNewSession/.test(app), "brak pendingNewSession");
     assert.ok(/function adoptBuildSession/.test(app), "brak adoptBuildSession");
     assert.ok(
-      /pendingNewSession && !selectedId/.test(app),
+      /awaitingOwnNewSession\(\) && !selectedId/.test(app),
       "isViewingSession nie trzyma nowej sesji"
     );
     assert.ok(
       /!streamBySession\[sid\]/.test(app),
       "nowy czat nadal zgłasza się po sid cudzej sesji"
     );
+    // Wyscig 17.08: A wyslana, po sekundzie New session i B. Spoznione sid
+    // dla A przygarnialo widok B i pytanie z B ladowalo w czacie A.
+    assert.ok(
+      /function awaitingOwnNewSession/.test(app),
+      "brak bramki epoki widoku — spoznione sid przygarnie cudzy widok"
+    );
+    assert.ok(
+      /pendingNewEpoch === viewEpoch/.test(app),
+      "adopcja nie sprawdza, czy to WLASNA nowa sesja tego widoku"
+    );
+    for (const fn of ["async function openSession", "async function newChat"]) {
+      const body = app.slice(app.indexOf(fn), app.indexOf(fn) + 200);
+      assert.ok(
+        /bumpViewEpoch\(\)/.test(body),
+        fn + " nie podbija wersji widoku — stara tura dalej moze go przejac"
+      );
+    }
   });
 }
 
