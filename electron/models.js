@@ -19,6 +19,15 @@ const FALLBACK_BUILD_MODELS = [
 
 const FALLBACK_CHAT_MODEL = "grok-4.6";
 const IMAGINE_IMAGE = "grok-imagine-image";
+const EFFORTS = ["low", "medium", "high", "xhigh"];
+/** grok-4.6 nie wyłącza myślenia. Domyśl API to high — u nas low, bo pierwsza odpowiedź ma być szybka. */
+const DEFAULT_EFFORT = "low";
+
+function normalizeEffort(v) {
+  const s = String(v || "").toLowerCase();
+  if (s === "med") return "medium";
+  return EFFORTS.includes(s) ? s : DEFAULT_EFFORT;
+}
 
 function isPublicChatModel(id) {
   return typeof id === "string" && /^grok-\d+\.\d+$/.test(id);
@@ -90,8 +99,11 @@ module.exports = {
   FALLBACK_BUILD_MODELS,
   FALLBACK_CHAT_MODEL,
   IMAGINE_IMAGE,
+  EFFORTS,
+  DEFAULT_EFFORT,
   isPublicChatModel,
   homeModelsFromApi,
   highestChatModelId,
   resolveChatModelId,
+  normalizeEffort,
 };

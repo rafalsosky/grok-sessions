@@ -68,7 +68,7 @@ uruchomieniu macOS ją zablokuje. Kliknij prawym przyciskiem, potem „Otwórz�
 ## Co jest w środku
 
 ### Home
-- Czat jak w przeglądarce Groka, z odpowiedzią **na żywo** (streaming)
+- Czat jak w przeglądarce Groka, z odpowiedzią **na żywo** (streaming) i widocznym „Myślę…”, gdy model jeszcze liczy
 - Generowanie grafik (`/image …`) i próba wideo, zależnie od konta
 - Załączniki: przeciągnij i upuść, wklejanie zrzutów ekranu (⌘V)
 - Stop przerywa faktycznie, także w trakcie odpowiedzi
@@ -79,7 +79,7 @@ uruchomieniu macOS ją zablokuje. Kliknij prawym przyciskiem, potem „Otwórz�
 - **Tryb uprawnień: Auto albo Pytaj.** W „Pytaj” agent prosi o zgodę na każde
   narzędzie i dostajesz okno z tym, co chce zrobić. Przełącznik obok pola tekstu
   albo w Ustawieniach.
-- Effort: Low / Med / High / xHigh
+- Effort: Low (domyślnie, szybka odpowiedź) / Med / High / xHigh. grok-4.6 nie wyłącza myślenia — Low to minimum. Ten sam przełącznik działa w Home i idzie do API jako `reasoning_effort`.
 - Kolejka wiadomości, gdy agent pracuje, plus **↩ Wyślij teraz** (przerywa turę
   i dokłada wiadomość do bieżącego zadania)
 - Strumień **izolowany per sesja** — przełączenie listy nie miesza odpowiedzi
@@ -240,6 +240,7 @@ README, a poprawki do tych czterech punktów przyjmę jako PR.
 | Aplikacja nie startuje po `npm start` | `node -v` musi być 18+; usuń `node_modules` i `npm install` od nowa |
 | macOS blokuje `.app` | prawy przycisk → Otwórz (aplikacja nie jest podpisana) |
 | `.app` alarmuje, że nie ma Electrona, choć jest | launcher zna ścieżkę z chwili budowania. Projekt przeniesiony → `npm run make-app` od nowa |
+| Odpowiedź długo nic nie pisze | grok-4.6 zawsze myśli. Ustaw Effort na Low (domyślnie od 0.3.1). High/xHigh są wolne z założenia |
 | Zmiana modelu/efortu nic nie robi | sesja jest w trakcie tury — restart procesu agenta jest wtedy niemożliwy, apka mówi to wprost |
 | Tygodniowy % pusty | tak ma być, dopóki nie włączysz czytania ciasteczek (patrz „Bezpieczeństwo”) |
 

@@ -4,7 +4,8 @@ const { spawn } = require("child_process");
 const { EventEmitter } = require("events");
 const readline = require("readline");
 const { expandHome } = require("./sessions");
-const { FALLBACK_CHAT_MODEL } = require("./models");
+const { FALLBACK_CHAT_MODEL, DEFAULT_EFFORT, normalizeEffort } = require("./models");
+const { spawnEnv, spawnCwd } = require("./env");
 
 /**
  * Long-lived grok agent stdio ACP client.
@@ -15,13 +16,13 @@ class AcpClient extends EventEmitter {
     grokPath,
     model,
     alwaysApprove = true,
-    reasoningEffort = "high",
+    reasoningEffort = DEFAULT_EFFORT,
   } = {}) {
     super();
     this.grokPath = expandHome(grokPath);
     this.model = model || FALLBACK_CHAT_MODEL;
     this.alwaysApprove = alwaysApprove;
-    this.reasoningEffort = reasoningEffort || "high";
+    this.reasoningEffort = normalizeEffort(reasoningEffort);
     this.proc = null;
     this.rl = null;
     this.nextId = 1;
@@ -32,6 +33,8 @@ class AcpClient extends EventEmitter {
     this.currentModelId = null;
     this._starting = null;
     this.cwd = null;
+    this.agentCapabilities = {};
+    this._loading = false;
   }
 
   async start() {
@@ -64,7 +67,8 @@ class AcpClient extends EventEmitter {
 
     this.proc = spawn(this.grokPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
+      cwd: spawnCwd(this.cwd),
+      env: spawnEnv(process.env),
     });
 
     // Bez tego handlera blad spawnu (brak binarki, brak praw) leci jako
@@ -98,11 +102,15 @@ class AcpClient extends EventEmitter {
     // Puste capabilities → narzędzia lecą po stronie procesu grok (jak headless).
     let init;
     try {
-      init = await this.request("initialize", {
-        protocolVersion: 1,
-        clientInfo: { name: "grok-sessions", version: "0.2.1" },
-        clientCapabilities: {},
-      });
+      init = await this.request(
+        "initialize",
+        {
+          protocolVersion: 1,
+          clientInfo: { name: "grok-sessions", version: "0.3.0" },
+          clientCapabilities: {},
+        },
+        { timeoutMs: 20000 }
+      );
     } catch (err) {
       // Zawieszony albo stary `grok` nie odpowiada na initialize. Bez tego
       // zabicia zostawal ZYWY proces, do ktorego nikt juz nie mial referencji
@@ -120,6 +128,8 @@ class AcpClient extends EventEmitter {
         (init.models && init.models.availableModels) ||
         []) ||
       [];
+    this.agentCapabilities =
+      init.agentCapabilities || init.capabilities || {};
     this.ready = true;
     this.emit("ready", init);
     this.emit("models", {
@@ -266,25 +276,34 @@ class AcpClient extends EventEmitter {
     if (sessionId && this.sessionId === sessionId) return { sessionId };
 
     if (sessionId) {
-      // Prefer load; fall back to resume
+      const params = { sessionId, cwd, mcpServers: [] };
+      // Desktop already rendered the transcript from disk. session/load
+      // replays every historical chunk into the live bubble. Prefer resume
+      // when the agent advertises it; fall back to a gated load.
+      const caps = this.agentCapabilities.sessionCapabilities || {};
+      const resumeFirst = caps.resume !== false;
+      if (resumeFirst) {
+        try {
+          const res = await this.request("session/resume", params, {
+            timeoutMs: 8000,
+          });
+          this.sessionId = sessionId;
+          this._applyModels(res);
+          return { sessionId, ...res };
+        } catch {
+          /* fall through to load */
+        }
+      }
+      this._loading = true;
       try {
-        const res = await this.request("session/load", {
-          sessionId,
-          cwd,
-          mcpServers: [],
+        const res = await this.request("session/load", params, {
+          timeoutMs: 30000,
         });
         this.sessionId = sessionId;
         this._applyModels(res);
         return { sessionId, ...res };
-      } catch (err) {
-        const res = await this.request("session/resume", {
-          sessionId,
-          cwd,
-          mcpServers: [],
-        });
-        this.sessionId = sessionId;
-        this._applyModels(res);
-        return { sessionId, ...res };
+      } finally {
+        this._loading = false;
       }
     }
 
@@ -349,7 +368,7 @@ class AcpClient extends EventEmitter {
   }
 
   async setEffort(level, { cwd } = {}) {
-    this.reasoningEffort = level || "high";
+    this.reasoningEffort = normalizeEffort(level);
     if (cwd) this.cwd = cwd;
     // Effort na żywym agencie — restart procesu (pewne)
     const sid = this.sessionId;
@@ -414,6 +433,26 @@ class AcpClient extends EventEmitter {
       }
     }
     return { ok: true, method: "restart" };
+  }
+
+  /** Przerwij turę bez zabijania procesu (MCP zostaje w pamięci). */
+  async cancel(sessionId) {
+    const sid = sessionId || this.sessionId;
+    if (!sid || !this.proc || !this.proc.stdin || !this.proc.stdin.writable) {
+      return false;
+    }
+    try {
+      this.proc.stdin.write(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "session/cancel",
+          params: { sessionId: sid },
+        }) + "\n"
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async stop() {

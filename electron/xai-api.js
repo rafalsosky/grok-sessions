@@ -4,6 +4,47 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const { loadAccount } = require("./account");
+const { DEFAULT_EFFORT, normalizeEffort } = require("./models");
+
+function extractStreamDelta(j) {
+  const delta =
+    j && j.choices && j.choices[0] && j.choices[0].delta
+      ? j.choices[0].delta
+      : null;
+  if (!delta || typeof delta !== "object") {
+    return { content: "", reasoning: "" };
+  }
+  const content = typeof delta.content === "string" ? delta.content : "";
+  let reasoning = "";
+  if (typeof delta.reasoning_content === "string") {
+    reasoning = delta.reasoning_content;
+  } else if (typeof delta.reasoning === "string") {
+    reasoning = delta.reasoning;
+  } else if (delta.reasoning && typeof delta.reasoning === "object") {
+    reasoning =
+      (typeof delta.reasoning.content === "string" && delta.reasoning.content) ||
+      (typeof delta.reasoning.text === "string" && delta.reasoning.text) ||
+      "";
+  }
+  return { content, reasoning };
+}
+
+function buildChatBody({
+  model,
+  messages,
+  max_tokens = 8192,
+  stream = false,
+  reasoning_effort,
+}) {
+  const body = { model, messages, max_tokens };
+  if (stream) body.stream = true;
+  const effort = normalizeEffort(reasoning_effort || DEFAULT_EFFORT);
+  // Chat Completions (legacy): reasoning_effort. Responses API: reasoning.effort.
+  // Wysyłamy obie formy — nieznane pole jest ignorowane.
+  body.reasoning_effort = effort;
+  body.reasoning = { effort };
+  return body;
+}
 
 function getAccessToken(grokHome) {
   const authPath = path.join(grokHome, "auth.json");
@@ -94,15 +135,18 @@ function apiRequest(
  */
 function chatCompletionsStream(
   token,
-  { model, messages, max_tokens = 8192, signal = null },
+  { model, messages, max_tokens = 8192, signal = null, reasoning_effort },
   onDelta
 ) {
-  const payload = JSON.stringify({
-    model,
-    messages,
-    max_tokens,
-    stream: true,
-  });
+  const payload = JSON.stringify(
+    buildChatBody({
+      model,
+      messages,
+      max_tokens,
+      stream: true,
+      reasoning_effort,
+    })
+  );
   return new Promise((resolve, reject) => {
     if (signal && signal.aborted) {
       reject(new Error("Aborted"));
@@ -154,12 +198,13 @@ function chatCompletionsStream(
             if (!data || data === "[DONE]") continue;
             try {
               const j = JSON.parse(data);
-              const delta =
-                (j.choices && j.choices[0] && j.choices[0].delta &&
-                  j.choices[0].delta.content) || "";
-              if (delta) {
-                full += delta;
-                if (typeof onDelta === "function") onDelta(delta);
+              const { content, reasoning } = extractStreamDelta(j);
+              if (reasoning && typeof onDelta === "function") {
+                onDelta(reasoning, "reasoning");
+              }
+              if (content) {
+                full += content;
+                if (typeof onDelta === "function") onDelta(content, "content");
               }
             } catch {
               /* niepełna ramka — pomiń */
@@ -200,12 +245,18 @@ async function listModels(token) {
  */
 async function chatCompletions(
   token,
-  { model, messages, max_tokens = 8192, signal = null }
+  { model, messages, max_tokens = 8192, signal = null, reasoning_effort }
 ) {
   return apiRequest(
     token,
     "/v1/chat/completions",
-    { model, messages, max_tokens },
+    buildChatBody({
+      model,
+      messages,
+      max_tokens,
+      stream: false,
+      reasoning_effort,
+    }),
     { signal }
   );
 }
@@ -417,4 +468,6 @@ module.exports = {
   looksLikeImagePrompt,
   stripImageCommand,
   loadAccount,
+  extractStreamDelta,
+  buildChatBody,
 };

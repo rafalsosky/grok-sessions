@@ -297,10 +297,11 @@ group("settings: walidacja i wartości domyślne");
   const { loadSettings, saveSettings } = require("../electron/settings");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-settings-test-"));
 
-  test("domyślnie: Auto, ciasteczka wyłączone", () => {
+  test("domyślnie: Auto, ciasteczka wyłączone, effort low", () => {
     const s = loadSettings(dir);
     assert.strictEqual(s.permissionMode, "auto");
     assert.strictEqual(s.readBrowserCookies, false);
+    assert.strictEqual(s.effort, "low");
     assert.ok(s.homeMaxTokens >= 1024);
   });
 
@@ -408,6 +409,110 @@ group("models: ranking i filtr listy Home");
       }),
       "grok-4.5"
     );
+  });
+
+  test("effort: puste i śmieci → low, med → medium", () => {
+    assert.strictEqual(m.normalizeEffort(undefined), "low");
+    assert.strictEqual(m.normalizeEffort(""), "low");
+    assert.strictEqual(m.normalizeEffort("nope"), "low");
+    assert.strictEqual(m.normalizeEffort("med"), "medium");
+    assert.strictEqual(m.normalizeEffort("HIGH"), "high");
+    assert.strictEqual(m.normalizeEffort("xhigh"), "xhigh");
+    assert.strictEqual(m.DEFAULT_EFFORT, "low");
+  });
+}
+
+group("env: PATH z Findera widzi npx i grok");
+{
+  const env = require("../electron/env");
+  test("loginPath dokłada /usr/local/bin i ~/.local/bin", () => {
+    const p = env.loginPath({ HOME: "/Users/someone", PATH: "/bin" });
+    assert.ok(p.includes("/usr/local/bin"), p);
+    assert.ok(p.includes("/opt/homebrew/bin"), p);
+    assert.ok(p.includes("/bin"), p);
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-env-"));
+    fs.mkdirSync(path.join(root, ".local", "bin"), { recursive: true });
+    fs.mkdirSync(path.join(root, ".grok", "bin"), { recursive: true });
+    const live = env.loginPath({ HOME: root, PATH: "/bin" });
+    assert.ok(live.includes(path.join(root, ".local", "bin")), live);
+    assert.ok(live.includes(path.join(root, ".grok", "bin")), live);
+  });
+  test("spawnEnv nie gubi HOME", () => {
+    const e = env.spawnEnv({ HOME: "/Users/someone", PATH: "/bin" });
+    assert.strictEqual(e.HOME, "/Users/someone");
+    assert.ok(e.PATH.includes("/opt/homebrew/bin"));
+  });
+}
+
+group("xai-api: reasoning_effort i delty myślenia");
+{
+  const xai = require("../electron/xai-api");
+
+  test("body czatu ma reasoning_effort low", () => {
+    const body = xai.buildChatBody({
+      model: "grok-4.6",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    assert.strictEqual(body.reasoning_effort, "low");
+    assert.deepStrictEqual(body.reasoning, { effort: "low" });
+    assert.ok(!body.stream);
+  });
+
+  test("body streamu zachowuje wybrany effort", () => {
+    const body = xai.buildChatBody({
+      model: "grok-4.6",
+      messages: [],
+      stream: true,
+      reasoning_effort: "medium",
+    });
+    assert.strictEqual(body.stream, true);
+    assert.strictEqual(body.reasoning_effort, "medium");
+  });
+
+  test("wyciąga content i reasoning_content z delty", () => {
+    assert.deepStrictEqual(
+      xai.extractStreamDelta({
+        choices: [{ delta: { content: "cześć", reasoning_content: "myślę" } }],
+      }),
+      { content: "cześć", reasoning: "myślę" }
+    );
+    assert.deepStrictEqual(
+      xai.extractStreamDelta({
+        choices: [{ delta: { reasoning: { text: "plan" } } }],
+      }),
+      { content: "", reasoning: "plan" }
+    );
+    assert.deepStrictEqual(xai.extractStreamDelta(null), {
+      content: "",
+      reasoning: "",
+    });
+  });
+
+  test("Home nie gubi thought chunków i nie pisze Writing przed pierwszym tokenem", () => {
+    const main = fs.readFileSync(path.join(ROOT, "electron", "main.js"), "utf8");
+    const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+    const sendHome = main.slice(
+      main.indexOf("async function sendHomeChat"),
+      main.indexOf("async function sendCodeChat")
+    );
+    assert.ok(
+      /reasoning_effort/.test(sendHome),
+      "Home nie wysyła reasoning_effort — grok-4.6 zostaje na high"
+    );
+    assert.ok(
+      /agent_thought_chunk/.test(sendHome),
+      "Home nie streamuje reasoning jako thought chunk"
+    );
+    const beforeStream = sendHome.slice(0, sendHome.indexOf("chatCompletionsStream"));
+    assert.ok(
+      !/status\("responding"/.test(beforeStream),
+      "Home stawia Writing zanim poleci pierwszy token"
+    );
+    assert.ok(
+      /mode === "home"[\s\S]{0,500}agent_thought_chunk/.test(app),
+      "renderer Home nadal odrzuca agent_thought_chunk"
+    );
+    assert.ok(/takeWarmClient/.test(main), "brak podgrzanego procesu grok");
   });
 }
 
@@ -549,6 +654,17 @@ group("build: New session odłącza bieżącą turę");
     assert.ok(
       /isBusy/.test(block[0]),
       "zmiana modelu w Build nie sprawdza, czy TA sesja leci"
+    );
+  });
+
+  test("app.js nie woła t() — to jest zmienna pętli, nie i18n", () => {
+    const src = fs
+      .readFileSync(path.join(ROOT, "src", "app.js"), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/.*$/gm, "");
+    assert.ok(
+      !/(^|[^\w.])t\s*\(/.test(src),
+      "gołe t() w app.js — ReferenceError, przycisk usage pokazuje !"
     );
   });
 
@@ -1051,18 +1167,29 @@ group("agent-pool: sesje jak karty terminala");
       "sesja nie bierze WLASNEGO klienta z puli"
     );
     assert.ok(
-      /client = await spawnClient\(\)/.test(block[0]),
+      /spawnClient\(\)/.test(block[0]),
       "brak osobnego procesu dla nowej sesji"
+    );
+    assert.ok(
+      /takeWarmClient\(\)/.test(block[0]),
+      "nowa sesja nie bierze podgrzanego procesu"
     );
   });
   test("chat:stop wymaga sessionId i nie zabija puli", () => {
     const block = main.match(/ipcMain\.handle\("chat:stop"[\s\S]*?\n  \}\);/);
     assert.ok(block, "brak chat:stop");
     assert.ok(/payload\.sessionId|sessionId/.test(block[0]), "Stop bez sessionId");
-    assert.ok(/pool\.stop/.test(block[0]), "Stop nie idzie w pulę");
+    assert.ok(
+      /client\.cancel/.test(block[0]),
+      "Stop zabija proces zamiast session/cancel"
+    );
     assert.ok(
       !/acp = null/.test(block[0]),
       "Stop nadal zeruje jedynego agenta"
+    );
+    assert.ok(
+      !/pool\.stop\(sessionId\)/.test(block[0]),
+      "Stop nadal zabija proces agenta — nastepna tura placi initialize"
     );
   });
   test("UI nie blokuje composera bo pracuje inna sesja", () => {

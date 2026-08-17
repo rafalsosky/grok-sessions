@@ -31,6 +31,7 @@ const {
 } = require("./attachments");
 const { getUsage } = require("./usage");
 const sessionFlags = require("./session-flags");
+const { normalizeEffort } = modelsLib;
 
 const execFileAsync = promisify(execFile);
 
@@ -102,10 +103,10 @@ async function refreshHomeModels() {
     homeModelsLive = next;
     if (settings.alwaysLatestModel) {
       const high = modelsLib.highestChatModelId(next);
-      const patch = {};
-      if (high && settings.homeModelId !== high) patch.homeModelId = high;
-      if (high && settings.modelId !== high) patch.modelId = high;
-      if (Object.keys(patch).length) saveSettings(userDataDir(), patch);
+      // Home API must not overwrite the Build model. The two lists differ.
+      if (high && settings.homeModelId !== high) {
+        saveSettings(userDataDir(), { homeModelId: high });
+      }
     }
     pushSessions(true);
   } catch {
@@ -278,7 +279,7 @@ function buildListPayload() {
       lastHomeSessionId: settings.lastHomeSessionId || "",
       lastCodeSessionId: settings.lastCodeSessionId || "",
       theme: settings.theme || "dark",
-      effort: settings.effort || "high",
+      effort: normalizeEffort(settings.effort),
       permissionMode: settings.permissionMode || "auto",
       readBrowserCookies: Boolean(settings.readBrowserCookies),
       pythonPath: settings.pythonPath || "",
@@ -388,6 +389,8 @@ function wireClient(client) {
     });
   });
   client.on("update", (params) => {
+    // session/load replays history — UI already has the transcript from disk.
+    if (client._loading) return;
     const sid =
       (params && (params.sessionId || params.session_id)) ||
       client.sessionId ||
@@ -445,7 +448,7 @@ function wireClient(client) {
   });
 }
 
-async function spawnClient() {
+async function spawnClient(cwd) {
   const settings = getSettings();
   const bin = checkGrokBinary(settings.grokPath);
   if (!bin.ok) throw new Error(bin.reason || "grok binary not found");
@@ -453,11 +456,64 @@ async function spawnClient() {
     grokPath: settings.grokPath,
     model: effectiveBuildModelId(settings),
     alwaysApprove: settings.permissionMode !== "ask",
-    reasoningEffort: settings.effort || "high",
+    reasoningEffort: normalizeEffort(settings.effort),
   });
+  client.cwd = expandHome(cwd || settings.defaultCwd);
   wireClient(client);
   await client.start();
   return client;
+}
+
+/** Proces grok podgrzany z góry — pierwsza wiadomość Build nie czeka na spawn. */
+let warmClient = null;
+let warming = false;
+
+async function discardWarmClient() {
+  const c = warmClient;
+  warmClient = null;
+  if (c) {
+    try {
+      await c.stop();
+    } catch {
+      /* martwy */
+    }
+  }
+}
+
+async function ensureWarmClient() {
+  if (warmClient && warmClient.ready) return;
+  if (warming) return;
+  const settings = getSettings();
+  const bin = checkGrokBinary(settings.grokPath);
+  if (!bin.ok) return;
+  warming = true;
+  try {
+    warmClient = await spawnClient();
+  } catch {
+    warmClient = null;
+  } finally {
+    warming = false;
+  }
+}
+
+function takeWarmClient() {
+  const settings = getSettings();
+  const wantModel = effectiveBuildModelId(settings);
+  const wantEffort = normalizeEffort(settings.effort);
+  if (
+    !warmClient ||
+    !warmClient.ready ||
+    warmClient.model !== wantModel ||
+    warmClient.reasoningEffort !== wantEffort
+  ) {
+    if (warmClient) discardWarmClient().catch(() => {});
+    setTimeout(() => ensureWarmClient().catch(() => {}), 100);
+    return null;
+  }
+  const c = warmClient;
+  warmClient = null;
+  setTimeout(() => ensureWarmClient().catch(() => {}), 100);
+  return c;
 }
 
 /**
@@ -467,7 +523,7 @@ async function clientForSession(sessionId, cwd) {
   if (sessionId && pool.has(sessionId)) {
     return pool.get(sessionId);
   }
-  const client = await spawnClient();
+  const client = takeWarmClient() || (await spawnClient());
   if (sessionId) {
     await client.ensureSession({ sessionId, cwd });
     pool.put(sessionId, client);
@@ -491,6 +547,7 @@ async function sendHomeChat({
   modelId,
   homeKind,
   aspectRatio,
+  effort,
 }) {
   const settings = getSettings();
   const token = xai.getAccessToken(settings.grokHome || resolveGrokHome());
@@ -609,6 +666,7 @@ async function sendHomeChat({
 
   status("thinking", "Thinking…");
   const model = effectiveHomeModelId(settings, modelId);
+  const reasoningEffort = normalizeEffort(effort || settings.effort);
 
   // Build OpenAI-style messages from history.
   // Obrazy jako base64 dołączamy TYLKO do ostatniej wiadomości użytkownika.
@@ -660,47 +718,66 @@ async function sendHomeChat({
     }
   });
 
-  status("responding", "Writing…");
-  // Streaming: tekst leci do UI na bieżąco, jak w Build.
+  // Zostajemy na „Thinking…”, aż poleci pierwszy token treści.
+  // Wcześniej od razu skakaliśmy na „Writing…”, choć model jeszcze myślał.
+  const chatModel = model.includes("imagine")
+    ? modelsLib.highestChatModelId(homeModelsLive)
+    : model;
   let reply = "";
   try {
-    reply = await xai.chatCompletionsStream(
+    const streamed = await xai.chatCompletionsStream(
       token,
       {
-        model: model.includes("imagine")
-          ? modelsLib.highestChatModelId(homeModelsLive)
-          : model,
+        model: chatModel,
         messages: apiMessages,
         max_tokens: settings.homeMaxTokens || 8192,
         signal,
+        reasoning_effort: reasoningEffort,
       },
-      (delta) => {
+      (delta, kind) => {
+        const isThink = kind === "reasoning";
+        if (!isThink) {
+          if (!reply) status("responding", "Writing…");
+          reply += delta;
+        }
         send("chat:update", {
           sessionId: chat.id,
           update: {
-            sessionUpdate: "agent_message_chunk",
+            sessionUpdate: isThink
+              ? "agent_thought_chunk"
+              : "agent_message_chunk",
             content: { text: delta },
           },
         });
       }
     );
+    if (streamed && streamed.length > reply.length) reply = streamed;
   } catch (err) {
     if (signal.aborted) throw new Error("Stopped");
-    // Awaryjnie bez streamu (np. gdy endpoint nie wspiera SSE)
-    const res = await xai.chatCompletions(token, {
-      model: model.includes("imagine")
-        ? modelsLib.highestChatModelId(homeModelsLive)
-        : model,
-      messages: apiMessages,
-      max_tokens: settings.homeMaxTokens || 8192,
-      signal,
-    });
-    reply =
-      (res.choices &&
-        res.choices[0] &&
-        res.choices[0].message &&
-        res.choices[0].message.content) ||
-      "";
+    if (!reply) {
+      const msg = String((err && err.message) || "");
+      if (/^HTTP 4|unauthorized|forbidden|invalid|Aborted|Stopped/i.test(msg)) {
+        throw err;
+      }
+      // Awaryjnie bez streamu tylko gdy SSE padło, a treści jeszcze nie ma
+      const res = await xai.chatCompletions(token, {
+        model: chatModel,
+        messages: apiMessages,
+        max_tokens: settings.homeMaxTokens || 8192,
+        signal,
+        reasoning_effort: reasoningEffort,
+      });
+      reply =
+        (res.choices &&
+          res.choices[0] &&
+          res.choices[0].message &&
+          res.choices[0].message.content) ||
+        "";
+    }
+  }
+
+  if (!String(reply || "").trim()) {
+    throw new Error("Empty reply from model");
   }
 
   const assistantMsg = {
@@ -730,7 +807,7 @@ async function sendCodeChat({ text, sessionId, cwd, attachments, turnToken }) {
   if (sid && pool.has(sid)) {
     client = pool.get(sid);
   } else {
-    client = await spawnClient();
+    client = takeWarmClient() || (await spawnClient());
     if (sid) {
       status("session", "Loading session…", sid);
       await client.ensureSession({ sessionId: sid, cwd: workCwd });
@@ -876,6 +953,16 @@ function registerIpc() {
         }
       }
     }
+    if (
+      partial &&
+      (partial.modelId ||
+        partial.effort ||
+        partial.permissionMode ||
+        partial.grokPath)
+    ) {
+      discardWarmClient().catch(() => {});
+      setTimeout(() => ensureWarmClient().catch(() => {}), 200);
+    }
     startWatchers();
     pushSessions(true);
     refreshHomeModels().catch(() => {});
@@ -956,6 +1043,7 @@ function registerIpc() {
           modelId,
           homeKind,
           aspectRatio,
+          effort,
         });
       } else {
         if (effort) saveSettings(userDataDir(), { effort });
@@ -1006,10 +1094,10 @@ function registerIpc() {
   ipcMain.handle("chat:set-effort", async (_e, payload) => {
     const effort = typeof payload === "string" ? payload : payload && payload.effort;
     const cwd = typeof payload === "object" && payload ? payload.cwd : null;
-    const level = ["low", "medium", "high", "xhigh"].includes(effort)
-      ? effort
-      : "high";
+    const level = normalizeEffort(effort);
     saveSettings(userDataDir(), { effort: level });
+    discardWarmClient().catch(() => {});
+    setTimeout(() => ensureWarmClient().catch(() => {}), 200);
     const sid =
       typeof payload === "object" && payload ? payload.sessionId : null;
     // Zmiana efortu restartuje proces agenta, wiec w srodku tury sie nie da.
@@ -1079,11 +1167,20 @@ function registerIpc() {
       if (!sessionId) {
         return { ok: false, error: "No sessionId — refusing to kill other sessions" };
       }
-      const stopped = await pool.stop(sessionId);
+      const client = pool.get(sessionId);
+      if (!client) {
+        send("chat:busy", { busy: false, mode: "grok", sessionId });
+        status("stopped", "Stopped", sessionId);
+        return { ok: true, stopped: false, sessionId };
+      }
+      // Cancel the turn. Killing the process threw away MCP handshake
+      // and the next send paid the full initialize cost again.
+      const cancelled = await client.cancel(sessionId);
+      pool.markBusy(sessionId, false);
       send("chat:busy", { busy: false, mode: "grok", sessionId });
       status("stopped", "Stopped", sessionId);
       pushSessions();
-      return { ok: true, stopped, sessionId };
+      return { ok: true, cancelled, sessionId };
     } catch (err) {
       if (sessionId) pool.markBusy(sessionId, false);
       send("chat:busy", { busy: false, mode: "grok", sessionId });
@@ -1320,6 +1417,7 @@ if (!gotLock) {
     startWatchers();
     setTimeout(pushSessions, 200);
     refreshHomeModels().catch(() => {});
+    setTimeout(() => ensureWarmClient().catch(() => {}), 400);
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) {
@@ -1355,5 +1453,5 @@ app.on("before-quit", (e) => {
   e.preventDefault();
   quitting = true;
   clearWatchers();
-  pool.stopAll().finally(() => app.exit(0));
+  Promise.all([pool.stopAll(), discardWarmClient()]).finally(() => app.exit(0));
 });

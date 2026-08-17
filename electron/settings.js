@@ -7,7 +7,7 @@ const {
   defaultGrokPath,
   expandHome,
 } = require("./sessions");
-const { FALLBACK_CHAT_MODEL } = require("./models");
+const { FALLBACK_CHAT_MODEL, DEFAULT_EFFORT, normalizeEffort } = require("./models");
 
 const DEFAULTS = {
   grokHome: "",
@@ -23,7 +23,7 @@ const DEFAULTS = {
   lastHomeSessionId: "",
   lastCodeSessionId: "",
   theme: "dark",
-  effort: "high",
+  effort: DEFAULT_EFFORT,
   /** "auto" = --always-approve (agent działa bez pytania), "ask" = agent pyta */
   permissionMode: "auto",
   /** Czytanie ciasteczek grok.com z Arc/Chrome pod tygodniowy %. Opt-in. */
@@ -77,9 +77,7 @@ function loadSettings(userDataDir) {
   if (merged.lastHomeSessionId == null) merged.lastHomeSessionId = "";
   if (merged.lastCodeSessionId == null) merged.lastCodeSessionId = "";
   if (!["dark", "light", "auto"].includes(merged.theme)) merged.theme = "dark";
-  if (!["low", "medium", "high", "xhigh"].includes(merged.effort)) {
-    merged.effort = "high";
-  }
+  merged.effort = normalizeEffort(merged.effort);
   if (!PERMISSION_MODES.includes(merged.permissionMode)) {
     merged.permissionMode = "auto";
   }
@@ -114,9 +112,7 @@ function saveSettings(userDataDir, partial) {
     lastHomeSessionId: next.lastHomeSessionId || "",
     lastCodeSessionId: next.lastCodeSessionId || "",
     theme: ["dark", "light", "auto"].includes(next.theme) ? next.theme : "dark",
-    effort: ["low", "medium", "high", "xhigh"].includes(next.effort)
-      ? next.effort
-      : "high",
+    effort: normalizeEffort(next.effort),
     permissionMode: PERMISSION_MODES.includes(next.permissionMode)
       ? next.permissionMode
       : "auto",

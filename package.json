@@ -1,7 +1,7 @@
 {
   "name": "supergrok-desktop-soskyapp",
   "productName": "SuperGrok Desktop SoskyApp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "SuperGrok Desktop SoskyApp — desktop shell for SuperGrok / Grok Build (Home + Build agent UI)",
   "main": "electron/main.js",
   "private": true,

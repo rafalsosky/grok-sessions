@@ -42,7 +42,7 @@
   let bootDone = false;
   /** Home: chat | image | video */
   let homeKind = "chat";
-  let effortLevel = "high";
+  let effortLevel = "low";
   /** "auto" = agent bez pytania, "ask" = zatwierdzam każde narzędzie */
   let permMode = "auto";
   /** Sesje Build, które teraz mają własny proces. Nie jedna na całą apkę. */
@@ -587,7 +587,7 @@
     const effortWrap = document.getElementById("effort-wrap");
     const ratioWrap = document.getElementById("ratio-wrap");
     if (mediaBar) mediaBar.classList.toggle("hidden", mode !== "home");
-    if (effortWrap) effortWrap.classList.toggle("hidden", mode !== "grok");
+    if (effortWrap) effortWrap.classList.remove("hidden");
     if (ratioWrap) {
       ratioWrap.classList.toggle(
         "hidden",
@@ -1035,6 +1035,56 @@
     return lastA;
   }
 
+  function upsertThinkingBlock(last, m) {
+    const body = last.querySelector(".msg-body");
+    if (!body) return;
+    let det = last.querySelector("details.thinking");
+    const thought = String(m.thinking || "");
+    if (!thought.trim()) {
+      if (det) det.remove();
+      return;
+    }
+    if (!det) {
+      det = document.createElement("details");
+      det.className = "thinking";
+      const sum = document.createElement("summary");
+      sum.textContent = tr("Thinking…");
+      const tb = document.createElement("div");
+      tb.className = "thinking-body";
+      det.appendChild(sum);
+      det.appendChild(tb);
+      const pill = body.querySelector(".agent-work-summary");
+      const labelEl = body.querySelector(".msg-label");
+      const after = pill || labelEl;
+      if (after && after.nextSibling) body.insertBefore(det, after.nextSibling);
+      else if (after) after.after(det);
+      else body.prepend(det);
+    }
+    det.open = Boolean(m._streaming && !String(m.text || "").trim());
+    const tb = det.querySelector(".thinking-body");
+    if (tb && tb.textContent !== thought) tb.textContent = thought;
+  }
+
+  function upsertTyping(last, m) {
+    const body = last.querySelector(".msg-body");
+    if (!body) return;
+    let typing = last.querySelector(".typing");
+    const need =
+      m._streaming &&
+      !String(cleanAssistantText(m.text || "")).trim() &&
+      !(m.tools && m.tools.length);
+    if (!need) {
+      if (typing) typing.remove();
+      return;
+    }
+    if (!typing) {
+      typing = document.createElement("div");
+      typing.className = "typing";
+      body.appendChild(typing);
+    }
+    typing.textContent = tr("Thinking…");
+  }
+
   /** Aktualizuj ostatnią odpowiedź bez full re-render (bez skoku scrolla). */
   function patchLastAssistantBubble(m) {
     if (!m) return;
@@ -1044,6 +1094,8 @@
       appendMessageRows([m], { stick: false });
       return;
     }
+    upsertThinkingBlock(last, m);
+    upsertTyping(last, m);
     // Zaznaczenie tekstu w tej bance ginelo przy kazdym chunku (innerHTML
     // przepisywany co klatke). Kolejny chunk i tak dorenderuje po puszczeniu.
     const sel = window.getSelection && window.getSelection();
@@ -1105,14 +1157,14 @@
       pill.className = "agent-work-summary" + (active.length ? " live" : "");
       if (active.length) {
         const ht = humanizeToolTitle(active[0].title);
-        pill.textContent = `Pracuję: ${ht}${
+        pill.textContent = `${tr("Working")}: ${ht}${
           active.length > 1 ? ` +${active.length - 1}` : ""
         }`;
       } else {
         const sum =
           (window.workSummary && window.workSummary.summarizeTools(tools)) || "";
-        // sama warstwa myślenia bez narzędzi → pusty chip, nie „Thinking”
-        pill.textContent = sum || (m._streaming && cur.busy ? "Thinking…" : "");
+        pill.textContent =
+          sum || (m._streaming && cur.busy ? tr("Thinking…") : "");
       }
       if (pill.textContent) body.appendChild(pill);
     }
@@ -1172,6 +1224,19 @@
       m.role === "user"
         ? cleanUserText(m.text)
         : cleanAssistantText(m.text || "");
+    if (m.role === "assistant" && String(m.thinking || "").trim()) {
+      const det = document.createElement("details");
+      det.className = "thinking";
+      det.open = Boolean(m._streaming && !displayText);
+      const sum = document.createElement("summary");
+      sum.textContent = tr("Thinking…");
+      const thought = document.createElement("div");
+      thought.className = "thinking-body";
+      thought.textContent = m.thinking;
+      det.appendChild(sum);
+      det.appendChild(thought);
+      body.appendChild(det);
+    }
     if (displayText) {
       const content = document.createElement("div");
       content.className = "msg-content";
@@ -1211,7 +1276,7 @@
     ) {
       const wait = document.createElement("div");
       wait.className = "typing";
-      wait.textContent = "…";
+      wait.textContent = tr("Thinking…");
       body.appendChild(wait);
     }
 
@@ -1258,7 +1323,7 @@
         tr("Delete"),
         mode === "grok"
           ? tr("Removes from view. The agent still remembers this turn in its session.")
-          : "Usuwa z widoku czatu",
+          : tr("Removes from the chat view"),
         () => deleteMessage(m)
       );
     }
@@ -1691,6 +1756,15 @@
     pendingNewSession = false;
     persistNav();
     renderList();
+  }
+
+  function isViewingHome(sid) {
+    if (mode !== "home" || !sid) return false;
+    return (
+      cur.selectedId === sid ||
+      cur.liveSessionId === sid ||
+      cur.sid === sid
+    );
   }
 
   function isViewingSession(sid) {
@@ -2234,14 +2308,21 @@
     if (mode === "home") {
       if (!cur.busy) return;
       const update = params.update || params;
-      if (update.sessionUpdate !== "agent_message_chunk") return;
+      const kind = update.sessionUpdate;
       const chunk = (update.content && update.content.text) || "";
       if (!chunk) return;
       const a = ensureStreamingAssistant();
-      const join =
-        typeof appendStreamChunk === "function" ? appendStreamChunk : (p, c) => p + c;
-      a.text = join(a.text || "", chunk);
-      setStatus("responding", tr("Writing…"), "home", { sessionId: sid });
+      if (kind === "agent_thought_chunk") {
+        a.thinking = (a.thinking || "") + chunk;
+        setStatus("thinking", tr("Thinking…"), "home", { sessionId: sid });
+      } else if (kind === "agent_message_chunk") {
+        const join =
+          typeof appendStreamChunk === "function" ? appendStreamChunk : (p, c) => p + c;
+        a.text = join(a.text || "", chunk);
+        setStatus("responding", tr("Writing…"), "home", { sessionId: sid });
+      } else {
+        return;
+      }
       if (!handleChatUpdate._raf) {
         handleChatUpdate._raf = requestAnimationFrame(() => {
           handleChatUpdate._raf = null;
@@ -2307,6 +2388,12 @@
       const a = ensureStreamingAssistant();
       a.thinking += (update.content && update.content.text) || "";
       setStatus("thinking", tr("Thinking…"), "grok", { sessionId: sid });
+      if (!handleChatUpdate._raf) {
+        handleChatUpdate._raf = requestAnimationFrame(() => {
+          handleChatUpdate._raf = null;
+          patchLastAssistantBubble(a);
+        });
+      }
       return;
     }
 
@@ -3123,7 +3210,7 @@
         mode === "home"
           ? document.getElementById("ratio-select")?.value || "1:1"
           : undefined,
-      effort: mode === "grok" ? effortLevel : undefined,
+      effort: effortLevel,
     });
 
     // Tura tej sesji się skończyła. Ale user mógł przez ten czas przełączyć
@@ -3135,7 +3222,10 @@
     setSessionBusy(doneSid, false);
 
     const stillViewing =
-      turnMode === mode && (turnMode !== "grok" || isViewingSession(doneSid));
+      turnMode === mode &&
+      (turnMode === "home"
+        ? !doneSid || isViewingHome(doneSid)
+        : isViewingSession(doneSid));
     if (!stillViewing) {
       if (doneSid) {
         const buf = ensureSessionStream(doneSid);
@@ -3519,7 +3609,7 @@
   });
 
   document.getElementById("effort-select")?.addEventListener("change", async (e) => {
-    effortLevel = e.target.value || "high";
+    effortLevel = e.target.value || "low";
     const res = await api.chatSetEffort({
       effort: effortLevel,
       cwd: selectedRow()?.cwd || defaultCwd,
@@ -3798,17 +3888,19 @@
     const msg = cleanUserText(message || "Error") || "Error";
     if (/\[Attachments/i.test(message || "")) return;
     const sid = sessionId || busySessionId;
-    if (mode === "home" || (sid && !isViewingSession(sid))) {
-      if (sid) {
-        const buf = ensureSessionStream(sid);
-        if (buf) {
-          buf.statusPhase = "error";
-          buf.statusDetail = msg.slice(0, 120);
-        }
+    showToast(msg.slice(0, 200), "error");
+    if (mode === "home") {
+      setStatus("error", msg.slice(0, 120), "home", { sessionId: sid });
+      return;
+    }
+    if (sid && !isViewingSession(sid)) {
+      const buf = ensureSessionStream(sid);
+      if (buf) {
+        buf.statusPhase = "error";
+        buf.statusDetail = msg.slice(0, 120);
       }
       return;
     }
-    showToast(msg.slice(0, 200), "error");
     setStatus("error", msg.slice(0, 120), mode, { sessionId: sid });
   });
   // Proces agenta padl. Wczesniej main wysylal to w prozne: sesja zostawala
@@ -3987,7 +4079,7 @@
         if (usageEls.weeklyDetail) {
           usageEls.weeklyDetail.textContent =
             plan?.weeklyError ||
-            t(
+            tr(
               "Weekly %: Settings → „Read grok.com cookies”. xAI does not expose this limit to the grok login token."
             );
         }
@@ -4063,7 +4155,7 @@
   function paintPermChip() {
     if (!permBtn) return;
     const ask = permMode === "ask";
-    permBtn.textContent = ask ? "Pytaj" : "Auto";
+    permBtn.textContent = ask ? tr("Ask") : tr("Auto");
     permBtn.classList.toggle("mode-ask", ask);
     permBtn.classList.toggle("mode-auto", !ask);
     permBtn.title = ask
