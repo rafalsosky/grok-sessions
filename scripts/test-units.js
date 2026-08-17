@@ -143,6 +143,22 @@ group("markdown: bloki kodu i bezpieczeństwo");
     assert.strictEqual(appendStreamChunk("abc", "def"), "abc def");
   });
 
+  test("pogrubiony tytuł nie zjada reszty akapitu", () => {
+    const out = renderMarkdown("**Kolejka.** Dopowiedzenia scalały się w jedną pozycję.");
+    assert.ok(out.includes("md-h"), "tytuł nie jest nagłówkiem: " + out);
+    assert.ok(out.includes("<p>"), "brak akapitu po tytule");
+    assert.ok(!/<strong>[^<]{80,}/.test(out), "ściana bold: " + out);
+  });
+
+  test("zmieniłemKolejka rozdziela się, openSession nie", () => {
+    const { normalizeMarkdown, renderMarkdown } = require("../src/markdown.js");
+    const out = renderMarkdown("Co zmieniłemKolejka ma pasek nad polem.");
+    assert.ok(out.includes("Kolejka ma pasek"), out);
+    assert.ok((out.match(/<p>/g) || []).length >= 2, "nie rozbito sklejonego tytułu");
+    const code = renderMarkdown("Wywołaj openSession potem.");
+    assert.ok(code.includes("openSession"), "camelCase rozbity");
+  });
+
   test("kod w fence nie jest rozbijany na akapity", () => {
     const out = renderMarkdown("```js\nfoo.Bar = 1;\n```");
     assert.ok(out.includes("foo.Bar = 1;"), "identyfikator w kodzie rozbity");
@@ -555,6 +571,51 @@ group("build: New session odłącza bieżącą turę");
    layoutChatBottom zerował paddingTop przed pomiarem, więc scrollTop
    zostawał na górze ostatniej strony historii. Transkrypt nadpisywał
    bańkę wysłaną w trakcie ładowania. */
+group("work-summary: linia jak u Claude");
+{
+  const ws = require("../src/work-summary.js");
+
+  test("klasyfikuje read / command / edit", () => {
+    assert.strictEqual(ws.classifyTool("read_file"), "read");
+    assert.strictEqual(ws.classifyTool("run_terminal_command"), "command");
+    assert.strictEqual(ws.classifyTool("search_replace"), "edit");
+    assert.strictEqual(ws.classifyTool("grep"), "search");
+  });
+
+  test("Read 7 files, ran 5 commands", () => {
+    const tools = [
+      ...Array(7).fill({ title: "read_file" }),
+      ...Array(5).fill({ title: "run_terminal_command" }),
+    ];
+    assert.strictEqual(ws.summarizeTools(tools), "Read 7 files, ran 5 commands");
+  });
+
+  test("plan pokazuje bieżące i prawie koniec", () => {
+    const plan = ws.planProgress([
+      { content: "A", status: "completed" },
+      { content: "B", status: "completed" },
+      { content: "Commit package", status: "in_progress" },
+      { content: "Deploy", status: "pending" },
+    ]);
+    assert.strictEqual(plan.done, 2);
+    assert.strictEqual(plan.current, "Commit package");
+    assert.strictEqual(plan.next, "Deploy");
+    const st = ws.buildWorkStatus({
+      tools: [{ title: "read_file", status: "completed" }],
+      planEntries: [
+        { content: "A", status: "completed" },
+        { content: "B", status: "in_progress" },
+      ],
+      phase: "tool",
+      elapsed: "3:22",
+    });
+    assert.ok(st.headline.includes("Read"));
+    assert.ok(st.now.includes("B"));
+    assert.ok(st.footer.includes("1/2"));
+    assert.ok(st.footer.includes("almost done"));
+  });
+}
+
 group("chat-history: dół sesji i merge po transkrypcie");
 {
   const ch = require("../src/chat-history");
@@ -647,6 +708,16 @@ group("chat-history: dół sesji i merge po transkrypcie");
       !/allMessages = \[\];\s*messages = \[\];\s*renderMessages/.test(fn[0]),
       "openSession nadal wipe'uje czat przed await transcript"
     );
+  });
+
+  test("status i kolejka: plan + steer po paczce narzędzi", () => {
+    const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+    const html = fs.readFileSync(path.join(ROOT, "src", "index.html"), "utf8");
+    assert.ok(/work-summary\.js/.test(html), "brak work-summary.js");
+    assert.ok(/id="status-sub"/.test(html), "brak drugiej linii statusu");
+    assert.ok(/kind === "plan"/.test(app), "ACP plan jest ignorowane");
+    assert.ok(/function scheduleSteerQueue/.test(app), "brak steer kolejki");
+    assert.ok(/function maybeSteerQueue/.test(app), "brak maybeSteerQueue");
   });
 
   test("nowy czat Build zostaje na widoku po pojawieniu się session id", () => {

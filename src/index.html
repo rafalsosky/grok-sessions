@@ -103,7 +103,10 @@
           <div id="queue-dock" class="queue-dock hidden" aria-live="polite"></div>
           <div id="status-bar" class="status-bar hidden">
             <span class="status-dot busy"></span>
-            <span id="status-text" data-i18n="Working…">Working…</span>
+            <div class="status-copy">
+              <span id="status-text" data-i18n="Working…">Working…</span>
+              <span id="status-sub" class="status-sub hidden"></span>
+            </div>
             <button type="button" id="btn-toggle-activity" class="linkish hidden" data-i18n="Show steps">Show steps</button>
           </div>
           <div id="activity-panel" class="activity-panel hidden"></div>
@@ -321,6 +324,7 @@
 
     <script src="./i18n.js"></script>
     <script src="./markdown.js"></script>
+    <script src="./work-summary.js"></script>
     <script src="./chat-history.js"></script>
     <script src="./app.js"></script>
   </body>

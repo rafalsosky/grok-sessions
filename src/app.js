@@ -1,4 +1,4 @@
-/* global grokSessions, renderMarkdown, appendStreamChunk */
+/* global grokSessions, renderMarkdown, appendStreamChunk, workSummary */
 
 (() => {
   /**
@@ -63,6 +63,7 @@
       messages: [],
       streamingAssistant: null,
       liveTools: [],
+      livePlan: [],
       attachments: [],
       messageQueue: [],
       busy: false,
@@ -86,6 +87,7 @@
   let messages = [];
   let streamingAssistant = null;
   let liveTools = [];
+  let livePlan = [];
   let attachments = [];
   let messageQueue = [];
   let busy = false;
@@ -100,6 +102,7 @@
     messages = b.messages;
     streamingAssistant = b.streamingAssistant;
     liveTools = b.liveTools;
+    livePlan = b.livePlan || [];
     attachments = b.attachments;
     messageQueue = b.messageQueue;
     busy = b.busy;
@@ -115,6 +118,7 @@
     b.messages = messages;
     b.streamingAssistant = streamingAssistant;
     b.liveTools = liveTools;
+    b.livePlan = livePlan;
     b.attachments = attachments;
     b.messageQueue = messageQueue;
     b.busy = busy;
@@ -172,6 +176,7 @@
     attachChips: document.getElementById("attach-chips"),
     statusBar: document.getElementById("status-bar"),
     statusText: document.getElementById("status-text"),
+    statusSub: document.getElementById("status-sub"),
     activityPanel: document.getElementById("activity-panel"),
     btnToggleActivity: document.getElementById("btn-toggle-activity"),
     dropOverlay: document.getElementById("drop-overlay"),
@@ -276,12 +281,46 @@
     return m > 0 ? `${m}:${String(s % 60).padStart(2, "0")}` : `${s}s`;
   }
 
+  function currentWorkStatus() {
+    const ws = window.workSummary;
+    if (!ws || typeof ws.buildWorkStatus !== "function") return null;
+    const active = liveTools.filter(
+      (t) => t.status !== "completed" && t.status !== "failed"
+    );
+    return ws.buildWorkStatus({
+      tools: liveTools,
+      planEntries: livePlan,
+      phase: bag().statusPhase,
+      currentTool: active[0] ? humanizeToolTitle(active[0].title) : lastStatusLabel,
+      elapsed: turnStartedAt ? fmtElapsed(Date.now() - turnStartedAt) : "",
+    });
+  }
+
   function paintStatusText() {
     if (!el.statusText) return;
+    const work = currentWorkStatus();
+    if (work && (work.headline || work.now) && (liveTools.length || livePlan.length)) {
+      const line = [work.headline, work.footer].filter(Boolean).join(" · ");
+      el.statusText.textContent = line || lastStatusLabel || tr("Working…");
+      if (el.statusSub) {
+        const sub = work.now
+          ? `${tr("Now")}: ${work.now}${
+              work.plan && work.plan.next ? ` · ${tr("Next")}: ${work.plan.next}` : ""
+            }`
+          : "";
+        el.statusSub.textContent = sub;
+        el.statusSub.classList.toggle("hidden", !sub);
+      }
+      return;
+    }
     const base = lastStatusLabel || tr("Thinking…");
     el.statusText.textContent = turnStartedAt
       ? `${base} · ${fmtElapsed(Date.now() - turnStartedAt)}`
       : base;
+    if (el.statusSub) {
+      el.statusSub.textContent = "";
+      el.statusSub.classList.add("hidden");
+    }
   }
 
   function startTurnTimer() {
@@ -396,39 +435,60 @@
   function renderActivity() {
     const active = liveTools.filter((t) => t.status !== "completed" && t.status !== "failed");
     const done = liveTools.filter((t) => t.status === "completed" || t.status === "failed");
-    el.btnToggleActivity.classList.toggle("hidden", liveTools.length === 0);
-    el.btnToggleActivity.textContent = showActivity
-      ? tr("Hide steps")
+    const work = currentWorkStatus();
+    const countLabel = work && work.headline
+      ? work.headline
       : `${tr("Steps")} (${liveTools.length})`;
+    el.btnToggleActivity.classList.toggle(
+      "hidden",
+      liveTools.length === 0 && livePlan.length === 0
+    );
+    el.btnToggleActivity.textContent = showActivity ? tr("Hide steps") : countLabel;
 
-    if (!showActivity || !liveTools.length) {
+    if (!showActivity || (!liveTools.length && !livePlan.length)) {
       el.activityPanel.classList.add("hidden");
       el.activityPanel.innerHTML = "";
       return;
     }
     el.activityPanel.classList.remove("hidden");
     el.activityPanel.innerHTML = "";
+    if (work && work.plan && work.plan.total) {
+      const h = document.createElement("div");
+      h.className = "activity-group";
+      h.textContent = `${tr("Now")} · ${work.plan.done}/${work.plan.total}`;
+      el.activityPanel.appendChild(h);
+      if (work.plan.current) {
+        const row = document.createElement("div");
+        row.className = "activity-row live";
+        row.textContent = work.plan.current;
+        el.activityPanel.appendChild(row);
+      }
+      if (work.plan.next) {
+        const row = document.createElement("div");
+        row.className = "activity-row";
+        row.textContent = `${tr("Next")}: ${work.plan.next}`;
+        el.activityPanel.appendChild(row);
+      }
+    }
     if (active.length) {
       const h = document.createElement("div");
       h.className = "activity-group";
-      h.textContent = tr("In progress");
+      h.textContent = `${tr("In progress")} · ${active.length}`;
       el.activityPanel.appendChild(h);
       for (const t of active) {
         const row = document.createElement("div");
         row.className = "activity-row live";
-        row.textContent = `${humanizeToolTitle(t.title)} · ${t.status || "…"}`;
+        row.textContent = humanizeToolTitle(t.title);
         el.activityPanel.appendChild(row);
       }
     }
     if (done.length) {
-      const h = document.createElement("div");
-      h.className = "activity-group";
-      h.textContent = `${tr("Completed")} (${done.length}) — ${tr("collapsed by default")}`;
-      el.activityPanel.appendChild(h);
       const det = document.createElement("details");
       det.className = "activity-done";
       const sum = document.createElement("summary");
-      sum.textContent = `${tr("Show")} ${done.length} ${tr("completed")}`;
+      sum.textContent = work && work.headline
+        ? work.headline
+        : `${tr("Show")} ${done.length} ${tr("completed")}`;
       det.appendChild(sum);
       for (const t of done) {
         const row = document.createElement("div");
@@ -1442,6 +1502,7 @@
         allMessages: [],
         streamingAssistant: null,
         liveTools: [],
+        livePlan: [],
         messageQueue: [],
         statusPhase: "",
         statusDetail: "",
@@ -1464,6 +1525,7 @@
       allMessages: allMessages.slice(),
       streamingAssistant,
       liveTools: (liveTools || []).slice(),
+      livePlan: (livePlan || []).slice(),
       messageQueue: (messageQueue || []).slice(),
       attachments: (attachments || []).slice(),
       statusPhase: bag().statusPhase || "",
@@ -1512,6 +1574,7 @@
   /** Wyczyść chrome UI (status, kroki, załączniki) — obca sesja. */
   function clearForeignSessionChrome() {
     liveTools = [];
+    livePlan = [];
     renderActivity();
     attachments = [];
     renderAttachChips();
@@ -1554,6 +1617,7 @@
         allMessages.find((m) => m.role === "assistant" && m._streaming) ||
         null;
       liveTools = (live.liveTools || []).slice();
+      livePlan = (live.livePlan || []).slice();
       messageQueue = (live.messageQueue || []).slice();
       attachments = (live.attachments || []).slice();
       visibleCount = Math.max(PAGE, allMessages.length);
@@ -1581,6 +1645,7 @@
     // Obca sesja (albo bez pracy) — transkrypt bez wipe przed await
     streamingAssistant = null;
     liveTools = [];
+    livePlan = [];
     messageQueue = [];
     clearForeignSessionChrome();
     visibleCount = PAGE;
@@ -1932,6 +1997,10 @@
       buf.allMessages.push(buf.streamingAssistant);
       return buf.streamingAssistant;
     };
+    if (kind === "plan") {
+      buf.livePlan = Array.isArray(update.entries) ? update.entries.slice() : [];
+      return;
+    }
     if (kind === "user_message_chunk") {
       if (buf.streamingAssistant) buf.streamingAssistant._streaming = false;
       buf.streamingAssistant = null;
@@ -2087,6 +2156,21 @@
       return;
     }
 
+    if (kind === "plan") {
+      livePlan = Array.isArray(update.entries) ? update.entries.slice() : [];
+      const work = currentWorkStatus();
+      if (work && work.now) {
+        setStatus("tool", work.now, "grok", { sessionId: sid });
+      } else {
+        paintStatusText();
+      }
+      renderActivity();
+      if (streamingAssistant) patchAgentWorkPill(streamingAssistant);
+      if (sid) snapshotCurrentBuildSession();
+      scheduleSteerQueue("plan");
+      return;
+    }
+
     if (kind === "tool_call") {
       const a = ensureStreamingAssistant();
       const rawTitle = update.title || update.tool || "tool";
@@ -2098,6 +2182,7 @@
       a.tools.push(tool);
       liveTools.push({ ...tool });
       setStatus("tool", humanizeToolTitle(rawTitle), "grok", { sessionId: sid });
+      paintStatusText();
       renderActivity();
       patchAgentWorkPill(a);
       if (sid) snapshotCurrentBuildSession();
@@ -2123,9 +2208,19 @@
           sessionId: sid,
         });
       }
+      paintStatusText();
       renderActivity();
       patchAgentWorkPill(a);
       if (sid) snapshotCurrentBuildSession();
+      const stillActive = liveTools.some(
+        (t) => t.status !== "completed" && t.status !== "failed"
+      );
+      if (
+        (update.status === "completed" || update.status === "failed") &&
+        !stillActive
+      ) {
+        scheduleSteerQueue("wave");
+      }
     }
   }
 
@@ -2144,13 +2239,16 @@
     const done = (m.tools || []).filter(
       (t) => t.status === "completed" || t.status === "failed"
     );
-    const label = active.length
-      ? `${tr("Working")}: ${humanizeToolTitle(active[0].title)}${active.length > 1 ? ` +${active.length - 1}` : ""}`
-      : done.length
-        ? `${done.length} ${tr("background steps · „Steps”")}`
-        : m.thinking
-          ? "Thinking…"
-          : "";
+    const work = currentWorkStatus();
+    const label = work && work.headline
+      ? [work.headline, work.now].filter(Boolean).join(" · ")
+      : active.length
+        ? `${tr("Working")}: ${humanizeToolTitle(active[0].title)}${active.length > 1 ? ` +${active.length - 1}` : ""}`
+        : done.length
+          ? `${done.length} ${tr("background steps · „Steps”")}`
+          : m.thinking
+            ? "Thinking…"
+            : "";
     if (!label) return;
     if (!pill) {
       pill = document.createElement("div");
@@ -2638,6 +2736,41 @@
     await injectQueuedNow(msg);
   }
 
+  /**
+   * Claude "steer": queued follow-up goes in at the next safe gap
+   * (tool wave finished, or a plan item just completed) — no click.
+   */
+  let steerTimer = 0;
+  let lastSteerAt = 0;
+  let steeringQueue = false;
+
+  function scheduleSteerQueue(reason) {
+    if (!messageQueue.length || steeringQueue || drainingQueue) return;
+    if (steerTimer) clearTimeout(steerTimer);
+    steerTimer = setTimeout(() => {
+      steerTimer = 0;
+      maybeSteerQueue(reason);
+    }, 450);
+  }
+
+  function maybeSteerQueue(reason) {
+    if (!messageQueue.length || steeringQueue || drainingQueue || !busy) return;
+    if (Date.now() - lastSteerAt < 8000) return;
+    const active = liveTools.some(
+      (t) => t.status !== "completed" && t.status !== "failed"
+    );
+    if (active && reason !== "plan") return;
+    steeringQueue = true;
+    lastSteerAt = Date.now();
+    const first = messageQueue[0];
+    showToast(tr("Queued — will send after this batch"), "ok");
+    injectQueuedNow(allMessages.find((m) => m.id === first.id) || first)
+      .catch(() => {})
+      .finally(() => {
+        steeringQueue = false;
+      });
+  }
+
   async function injectQueuedNow(msg) {
     const text = cleanUserText(msg?.text || "");
     const atts = (msg && msg.attachments) || [];
@@ -2770,6 +2903,7 @@
     pushAll(streamingAssistant);
     toAppend.push(streamingAssistant);
     liveTools = [];
+    livePlan = [];
 
     if (clearInput) el.input.value = "";
     attachments = [];
@@ -3028,6 +3162,7 @@
     messages = [];
     streamingAssistant = null;
     liveTools = [];
+    livePlan = [];
     visibleCount = PAGE;
     attachments = [];
     messageQueue = [];
@@ -3489,6 +3624,7 @@
       el.statusBar.classList.add("hidden");
       el.statusText.textContent = "";
       liveTools = [];
+    livePlan = [];
       renderActivity();
     } else {
       setBusy(false, mode);

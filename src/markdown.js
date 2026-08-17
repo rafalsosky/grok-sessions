@@ -128,8 +128,9 @@ function renderTable(block) {
 function inlineFormat(s) {
   let t = escapeHtml(s);
   t = t.replace(/`([^`]+)`/g, '<code class="md-inline">$1</code>');
-  t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  t = t.replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+  // Bold only for short spans. A 200-char **...** is a glued heading, not emphasis.
+  t = t.replace(/\*\*([^*]{1,80})\*\*/g, "<strong>$1</strong>");
+  t = t.replace(/(^|[^\*])\*([^*\n]{1,80})\*(?!\*)/g, "$1<em>$2</em>");
   t = t.replace(
     /\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
     '<a href="$2" target="_blank" rel="noreferrer">$1</a>'
@@ -146,6 +147,16 @@ function unglueSentences(t) {
   );
   // "VPS.Praca"
   t = t.replace(/([A-Z]{2,})\.([A-Z][a-ząćęłńóśźż]{2,})/g, "$1.\n\n$2");
+  // "zmieniłemKolejka" — Polish word glued to a title. Skip openSession.
+  t = t.replace(
+    /([a-z]*[ąćęłńóśźż][a-ząćęłńóśźż]*)([A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]{3,})/g,
+    "$1\n\n$2"
+  );
+  // **Title**GluedNext
+  t = t.replace(
+    /(\*\*[^*]{2,60}\*\*)([A-ZĄĆĘŁŃÓŚŹŻ])/g,
+    "$1\n\n$2"
+  );
   return t;
 }
 
@@ -202,6 +213,15 @@ function renderMarkdown(src) {
     if (h) {
       const level = Math.min(h[1].length + 2, 5); // ## → h4 visually
       out.push(`<h${level} class="md-h">${inlineFormat(h[2])}</h${level}>`);
+      i++;
+      continue;
+    }
+
+    // **Kolejka.** rest of the sentence → title + body, not one bold wall
+    const boldHead = trimmed.match(/^\*\*([^*]{2,60})\*\*\s*(.*)$/);
+    if (boldHead && /^[A-ZĄĆĘŁŃÓŚŹŻ]/.test(boldHead[1])) {
+      out.push(`<h4 class="md-h">${inlineFormat(boldHead[1])}</h4>`);
+      if (boldHead[2]) out.push(`<p>${inlineFormat(boldHead[2])}</p>`);
       i++;
       continue;
     }

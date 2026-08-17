@@ -101,6 +101,13 @@ const PL = {
   File: "Plik",
   "Show steps": "Pokaż kroki",
   "Hide steps": "Ukryj kroki",
+  "Read 1 file": "1 plik",
+  "almost done": "prawie koniec",
+  "Now": "Teraz",
+  Next: "Dalej",
+  "running now": "w toku",
+  "Queued — will send after this batch":
+    "W kolejce — wyślę po tej paczce narzędzi",
   "In progress": "W toku",
   Completed: "Ukończone",
   Show: "Pokaż",
