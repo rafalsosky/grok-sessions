@@ -44,6 +44,8 @@
   let busySessionId = null;
   /** New session: nie wciągaj Thinking ze starej tury, dopóki nie wyślesz. */
   let detachedBuild = false;
+  /** New Build chat: session id still unknown — keep stream on this view. */
+  let pendingNewSession = false;
   /** { [sessionId]: { unread, pinned } } */
   let sessionFlagMap = {};
   /**
@@ -1469,11 +1471,42 @@
     };
   }
 
+  function stampSessionId(sid) {
+    if (!sid) return;
+    for (const m of allMessages) {
+      if (!m._sid) m._sid = sid;
+    }
+    if (streamingAssistant && !streamingAssistant._sid) {
+      streamingAssistant._sid = sid;
+    }
+  }
+
+  /** New chat gets a real session id mid-turn — stay on this view. */
+  function adoptBuildSession(sid) {
+    if (!sid || mode !== "grok") return;
+    if (selectedId === sid || liveSessionId === sid) {
+      stampSessionId(sid);
+      return;
+    }
+    if (!pendingNewSession) return;
+    if (selectedId && selectedId !== sid) return;
+    selectedId = sid;
+    liveSessionId = sid;
+    pendingNewSession = false;
+    stampSessionId(sid);
+    snapshotCurrentBuildSession();
+    persistNav();
+    renderList();
+  }
+
   function isViewingSession(sid) {
     if (!sid) return false;
     if (detachedBuild) return false;
-    // wyłącznie selectedId — liveSessionId bywa mylące przy race
-    return mode === "grok" && selectedId === sid;
+    if (mode !== "grok") return false;
+    if (selectedId === sid) return true;
+    // First send of a new chat: selectedId is still null
+    if (pendingNewSession && !selectedId) return true;
+    return false;
   }
 
   /** Wyczyść chrome UI (status, kroki, załączniki) — obca sesja. */
@@ -1512,8 +1545,14 @@
     const hasLiveWork = Boolean(live && busySessionId === row.id);
 
     if (hasLiveWork) {
-      allMessages = (live.allMessages || []).slice();
-      streamingAssistant = live.streamingAssistant || null;
+      const mergeLive =
+        chatHistory.mergeLiveBufferWithLocals ||
+        ((a, b) => (a || []).concat(b || []));
+      allMessages = mergeLive(live.allMessages || [], allMessages, row.id);
+      streamingAssistant =
+        live.streamingAssistant ||
+        allMessages.find((m) => m.role === "assistant" && m._streaming) ||
+        null;
       liveTools = (live.liveTools || []).slice();
       messageQueue = (live.messageQueue || []).slice();
       attachments = (live.attachments || []).slice();
@@ -1602,9 +1641,10 @@
     );
     const merge =
       chatHistory.mergeTranscriptWithLocals || ((a, b) => a.concat(b || []));
-    const extras = allMessages.filter(
-      (m) => (m._local || m._streaming) && m._sid === row.id
-    );
+    const extras = allMessages.filter((m) => {
+      if (!(m._local || m._streaming)) return false;
+      return !m._sid || m._sid === row.id;
+    });
     allMessages = merge(cleaned, extras);
     holdStick(1200);
     syncVisibleMessages();
@@ -1955,6 +1995,7 @@
   function handleChatUpdate(params) {
     // NIGDY nie fallbackuj na liveSessionId/selectedId — to wlewało stream w obcą sesję
     const sid = (params && params.sessionId) || busySessionId || null;
+    if (sid && mode === "grok") adoptBuildSession(sid);
     if (!sid) {
       // nieoznaczony stream — tylko do offscreen busySession jeśli znamy
       if (busySessionId) applyStreamOffscreen(busySessionId, params);
@@ -2644,6 +2685,7 @@
     const cwd = selectedRow()?.cwd || defaultCwd;
     if (mode === "grok") detachedBuild = false;
     const sessionId = liveSessionId || selectedId || null;
+    pendingNewSession = mode === "grok" && !sessionId;
     const displayText = cleanUserText(text); // bez markerów / „Wstrzyknieto…”
 
     // Znajdź bańkę z kolejki do reuse (nie klonuj po wysłaniu)
@@ -2981,6 +3023,7 @@
 
     selectedId = null;
     liveSessionId = null;
+    pendingNewSession = false;
     allMessages = [];
     messages = [];
     streamingAssistant = null;
@@ -3410,6 +3453,7 @@
       if (!busySessionId && mode === "grok") {
         busySessionId = liveSessionId || selectedId || null;
       }
+      if (sessionId) adoptBuildSession(sessionId);
       bags.grok.busy = true;
       if (busySessionId && isViewingSession(busySessionId)) {
         snapshotCurrentBuildSession();

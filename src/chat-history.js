@@ -25,20 +25,47 @@ function mergeTranscriptWithLocals(mapped, current) {
       .map((m) => String((m && (m.text || m.content)) || "").trim())
       .filter(Boolean)
   );
+  const out = base.slice();
   for (const m of extras) {
     const t = String((m.text || m.content || "").trim());
     if (m._streaming || !t || !seen.has(t)) {
-      base.push(m);
+      // First user bubble belongs at the start, not after the reply.
+      if (m.role === "user" && m._local && !out.some((x) => x.role === "user")) {
+        out.unshift(m);
+      } else {
+        out.push(m);
+      }
       if (t) seen.add(t);
     }
   }
-  return base;
+  return out;
+}
+
+/**
+ * Live buffer of a brand-new session often has only the assistant
+ * (stream went offscreen before the session id existed). Put local
+ * user bubbles back, including those still missing _sid.
+ */
+function mergeLiveBufferWithLocals(liveMsgs, current, sid) {
+  const extras = (current || []).filter((m) => {
+    if (!m || !(m._local || m._streaming)) return false;
+    if (m._sid && sid && m._sid !== sid) return false;
+    return true;
+  });
+  return mergeTranscriptWithLocals(liveMsgs || [], extras);
+}
+
+function isOrphanLocalForSession(m, sid) {
+  if (!m || !(m._local || m._streaming)) return false;
+  return !m._sid || m._sid === sid;
 }
 
 const api = {
   contentHeightWithoutPad,
   nextChatPadding,
   mergeTranscriptWithLocals,
+  mergeLiveBufferWithLocals,
+  isOrphanLocalForSession,
 };
 
 if (typeof module !== "undefined" && module.exports) {

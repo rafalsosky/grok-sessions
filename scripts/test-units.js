@@ -581,6 +581,25 @@ group("chat-history: dół sesji i merge po transkrypcie");
     assert.strictEqual(out[out.length - 1]._streaming, true);
   });
 
+  test("live bufor bez usera odzyskuje pierwszą lokalną wiadomość", () => {
+    const live = [
+      { role: "assistant", text: "Zaczynam od screenów", _streaming: true },
+    ];
+    const current = [
+      {
+        role: "user",
+        text: "sprawdź swój kod",
+        _local: true,
+        _sid: null,
+      },
+      { role: "assistant", text: "", _streaming: true, _sid: null },
+    ];
+    const out = ch.mergeLiveBufferWithLocals(live, current, "sid-1");
+    assert.strictEqual(out[0].role, "user");
+    assert.strictEqual(out[0].text, "sprawdź swój kod");
+    assert.ok(out.some((m) => m.role === "assistant" && m.text));
+  });
+
   test("nowa tura nie dopisuje do poprzedniej bańki asystenta", () => {
     const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
     assert.ok(
@@ -621,8 +640,26 @@ group("chat-history: dół sesji i merge po transkrypcie");
       "openSession nie scala lokalnych baniek z transkryptem"
     );
     assert.ok(
+      /mergeLiveBufferWithLocals/.test(fn[0]),
+      "live bufor nowej sesji nadpisuje czat bez pierwszej wiadomości"
+    );
+    assert.ok(
       !/allMessages = \[\];\s*messages = \[\];\s*renderMessages/.test(fn[0]),
       "openSession nadal wipe'uje czat przed await transcript"
+    );
+  });
+
+  test("nowy czat Build zostaje na widoku po pojawieniu się session id", () => {
+    const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+    assert.ok(/pendingNewSession/.test(app), "brak pendingNewSession");
+    assert.ok(/function adoptBuildSession/.test(app), "brak adoptBuildSession");
+    assert.ok(
+      /pendingNewSession && !selectedId/.test(app),
+      "isViewingSession nie trzyma nowej sesji"
+    );
+    assert.ok(
+      /!m\._sid \|\| m\._sid === row\.id/.test(app),
+      "openSession odrzuca lokalne bańki bez _sid"
     );
   });
 }
