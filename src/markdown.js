@@ -14,6 +14,27 @@ function escapeHtml(s) {
 }
 
 /**
+ * Stream often delivers "VPS." + "Praca siedzi" as two chunks with no
+ * space. Join them so the next sentence starts on a new paragraph.
+ */
+function appendStreamChunk(prev, chunk) {
+  const a = String(prev || "");
+  const b = String(chunk || "");
+  if (!b) return a;
+  if (!a) return b;
+  const aEnd = a.replace(/\s+$/, "");
+  const bStart = b.replace(/^\s+/, "");
+  if (!bStart) return a;
+  if (/[.!?…]["”')\]]?$/.test(aEnd) && /^[A-ZĄĆĘŁŃÓŚŹŻ]/.test(bStart)) {
+    return aEnd + "\n\n" + bStart;
+  }
+  if (/[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9]$/.test(aEnd) && /^[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]/.test(bStart)) {
+    return aEnd + " " + bStart;
+  }
+  return a + b;
+}
+
+/**
  * When the model dumps markdown without newlines, recover structure.
  */
 function normalizeMarkdown(src) {
@@ -116,6 +137,18 @@ function inlineFormat(s) {
   return t;
 }
 
+/** Split stream-glued sentences. Run AFTER fences are cut out. */
+function unglueSentences(t) {
+  // "siedzi.Jest" — 4+ letters, no space. Skip foo.Bar / i.e.
+  t = t.replace(
+    /([a-ząćęłńóśźż]{4,})\.([A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]{2,})/g,
+    "$1.\n\n$2"
+  );
+  // "VPS.Praca"
+  t = t.replace(/([A-Z]{2,})\.([A-Z][a-ząćęłńóśźż]{2,})/g, "$1.\n\n$2");
+  return t;
+}
+
 function renderMarkdown(src) {
   if (!src) return "";
   let text = normalizeMarkdown(src);
@@ -140,6 +173,8 @@ function renderMarkdown(src) {
     );
     return `\n\n\u0000BLOCK${i}\u0000\n\n`;
   });
+
+  text = unglueSentences(text);
 
   // Split into blocks by blank lines, but keep table/list clusters
   const lines = text.split("\n");
@@ -255,8 +290,14 @@ function renderMarkdown(src) {
 if (typeof window !== "undefined") {
   window.renderMarkdown = renderMarkdown;
   window.normalizeMarkdown = normalizeMarkdown;
+  window.appendStreamChunk = appendStreamChunk;
 }
 
 if (typeof module !== "undefined") {
-  module.exports = { renderMarkdown, escapeHtml, normalizeMarkdown };
+  module.exports = {
+    renderMarkdown,
+    escapeHtml,
+    normalizeMarkdown,
+    appendStreamChunk,
+  };
 }

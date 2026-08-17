@@ -1,4 +1,4 @@
-/* global grokSessions, renderMarkdown */
+/* global grokSessions, renderMarkdown, appendStreamChunk */
 
 (() => {
   /**
@@ -577,7 +577,10 @@
     }
     const groups = new Map();
     for (const r of list) {
-      const g = dayBucket(r.lastActiveAt || r.updatedAt);
+      const g =
+        mode === "grok"
+          ? basenameCwd(r.cwd) || tr("Build")
+          : dayBucket(r.lastActiveAt || r.updatedAt);
       if (!groups.has(g)) groups.set(g, []);
       groups.get(g).push(r);
     }
@@ -599,13 +602,14 @@
           (fl.unread ? " unread" : "") +
           (fl.pinned ? " pinned" : "");
         li.innerHTML = `
-          <div style="min-width:0">
+          <span class="session-dot" aria-hidden="true"></span>
+          <div class="session-main">
             <div class="title"></div>
-            <div class="meta"></div>
           </div>
           <div class="session-badges">
             ${fl.pinned ? '<span class="pin-mark" title="Pinned">📌</span>' : ""}
             ${fl.unread ? '<span class="unread-dot" title="Unread"></span>' : ""}
+            <span class="session-time"></span>
             ${
               isWorking
                 ? '<span class="live-dot working"></span>'
@@ -621,14 +625,12 @@
             ? tr("Working in this session")
             : tr("Active in terminal");
         }
-        li.querySelector(".meta").textContent = [
-          mode === "home" ? "Home" : basenameCwd(r.cwd),
-          isWorking
+        const timeEl = li.querySelector(".session-time");
+        if (timeEl) {
+          timeEl.textContent = isWorking
             ? tr("working…")
-            : relativeTime(r.lastActiveAt || r.updatedAt),
-        ]
-          .filter(Boolean)
-          .join(" · ");
+            : relativeTime(r.lastActiveAt || r.updatedAt);
+        }
         li.addEventListener("click", () => {
           // otwarcie = przeczytane
           if (fl.unread) markSessionFlag(r.id, { unread: false });
@@ -846,10 +848,35 @@
     return nodes[nodes.length - 1] || null;
   }
 
+  function cssAttr(v) {
+    return String(v || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  }
+
+  /** Bańka asystenta po ostatniej wiadomości usera — nigdy wcześniejsza tura. */
+  function findAssistantRowFor(m) {
+    if (m && m.id) {
+      const hit = el.messages.querySelector(
+        `.msg.assistant[data-msg-id="${cssAttr(m.id)}"]`
+      );
+      if (hit) return hit;
+    }
+    const lastA = findLastAssistantRow();
+    if (!lastA) return null;
+    const users = el.messages.querySelectorAll(".msg.user");
+    const lastU = users[users.length - 1] || null;
+    if (
+      lastU &&
+      lastA.compareDocumentPosition(lastU) & Node.DOCUMENT_POSITION_FOLLOWING
+    ) {
+      return null;
+    }
+    return lastA;
+  }
+
   /** Aktualizuj ostatnią odpowiedź bez full re-render (bez skoku scrolla). */
   function patchLastAssistantBubble(m) {
     if (!m) return;
-    let last = findLastAssistantRow();
+    let last = findAssistantRowFor(m);
     if (!last) {
       // NIGDY full renderMessages w trakcie tury — tylko doklej
       appendMessageRows([m], { stick: false });
@@ -1724,15 +1751,33 @@
     return allMessages[allMessages.length - 1] || null;
   }
 
+  function closeStreamingAssistant() {
+    if (handleChatUpdate._raf) {
+      cancelAnimationFrame(handleChatUpdate._raf);
+      handleChatUpdate._raf = null;
+    }
+    if (streamingAssistant) {
+      streamingAssistant._streaming = false;
+      streamingAssistant = null;
+    }
+  }
+
   function ensureStreamingAssistant() {
-    if (streamingAssistant) return streamingAssistant;
-    // reuse empty streaming shell already in history (po Enter)
-    for (let i = allMessages.length - 1; i >= 0; i--) {
-      const m = allMessages[i];
-      if (m.role === "assistant" && m._streaming) {
-        streamingAssistant = m;
-        return m;
+    if (streamingAssistant && streamingAssistant._streaming) {
+      const after = lastAll();
+      // user already sent a follow-up — do not keep writing into the old bubble
+      if (after && after !== streamingAssistant) {
+        streamingAssistant._streaming = false;
+        streamingAssistant = null;
+      } else {
+        return streamingAssistant;
       }
+    }
+    const last = lastAll();
+    if (last && last.role === "assistant") {
+      streamingAssistant = last;
+      last._streaming = true;
+      return last;
     }
     streamingAssistant = {
       id: `stream-${Date.now()}`,
@@ -1743,10 +1788,8 @@
       _streaming: true,
     };
     pushAll(streamingAssistant);
-    // tylko jeśli nie ma w DOM
-    const last = el.messages.lastElementChild;
-    if (!last || !last.classList.contains("assistant")) {
-      // nie wymuszaj stick — nie skacz na dół / górę
+    const row = findAssistantRowFor(streamingAssistant);
+    if (!row) {
       appendMessageRows([streamingAssistant], { stick: false });
     }
     return streamingAssistant;
@@ -1825,16 +1868,18 @@
     const kind = update.sessionUpdate;
     if (!kind) return;
     const ensure = () => {
-      if (buf.streamingAssistant && buf.streamingAssistant._streaming) {
+      const last = buf.allMessages[buf.allMessages.length - 1];
+      if (
+        buf.streamingAssistant &&
+        buf.streamingAssistant._streaming &&
+        last === buf.streamingAssistant
+      ) {
         return buf.streamingAssistant;
       }
-      // reuse last streaming shell in buffer messages
-      for (let i = buf.allMessages.length - 1; i >= 0; i--) {
-        const m = buf.allMessages[i];
-        if (m.role === "assistant" && m._streaming) {
-          buf.streamingAssistant = m;
-          return m;
-        }
+      if (last && last.role === "assistant") {
+        buf.streamingAssistant = last;
+        last._streaming = true;
+        return last;
       }
       buf.streamingAssistant = {
         id: `stream-${Date.now()}`,
@@ -1847,13 +1892,35 @@
       buf.allMessages.push(buf.streamingAssistant);
       return buf.streamingAssistant;
     };
-    if (kind === "user_message_chunk") return;
+    if (kind === "user_message_chunk") {
+      if (buf.streamingAssistant) buf.streamingAssistant._streaming = false;
+      buf.streamingAssistant = null;
+      const t = cleanUserText((update.content && update.content.text) || "");
+      const last = buf.allMessages[buf.allMessages.length - 1];
+      if (t && !(last && last.role === "user")) {
+        buf.allMessages.push({
+          id: `u-off-${Date.now()}`,
+          role: "user",
+          text: t,
+          tools: [],
+          _local: false,
+        });
+      }
+      return;
+    }
+    if (kind === "turn_completed" || kind === "task_completed") {
+      if (buf.streamingAssistant) buf.streamingAssistant._streaming = false;
+      buf.streamingAssistant = null;
+      buf.statusPhase = "done";
+      return;
+    }
     if (kind === "agent_message_chunk") {
       const chunk = (update.content && update.content.text) || "";
       if (isToolEchoText(chunk) || isAttachmentJunkOnly(chunk)) return;
       const a = ensure();
-      a.text += chunk;
-      a.text = cleanAssistantText(a.text);
+      const join =
+        typeof appendStreamChunk === "function" ? appendStreamChunk : (p, c) => p + c;
+      a.text = cleanAssistantText(join(a.text || "", chunk));
       buf.statusPhase = "responding";
       buf.statusDetail = tr("Writing…");
     } else if (kind === "agent_thought_chunk") {
@@ -1904,7 +1971,9 @@
       const chunk = (update.content && update.content.text) || "";
       if (!chunk) return;
       const a = ensureStreamingAssistant();
-      a.text += chunk;
+      const join =
+        typeof appendStreamChunk === "function" ? appendStreamChunk : (p, c) => p + c;
+      a.text = join(a.text || "", chunk);
       setStatus("responding", tr("Writing…"), "home", { sessionId: sid });
       if (!handleChatUpdate._raf) {
         handleChatUpdate._raf = requestAnimationFrame(() => {
@@ -1932,6 +2001,12 @@
       return;
     }
 
+    if (kind === "turn_completed" || kind === "task_completed") {
+      closeStreamingAssistant();
+      if (sid) snapshotCurrentBuildSession();
+      return;
+    }
+
     if (kind === "agent_message_chunk") {
       const chunk = (update.content && update.content.text) || "";
       if (isAttachmentJunkOnly(chunk)) return;
@@ -1945,8 +2020,9 @@
         return;
       }
       const a = ensureStreamingAssistant();
-      a.text += chunk;
-      a.text = cleanAssistantText(a.text);
+      const join =
+        typeof appendStreamChunk === "function" ? appendStreamChunk : (p, c) => p + c;
+      a.text = cleanAssistantText(join(a.text || "", chunk));
       if (!a.text.trim()) {
         setStatus("tool", tr("Working in the background…"), "grok", { sessionId: sid });
         return;
@@ -2068,12 +2144,18 @@
       b.allMessages.push(b.streamingAssistant);
       return b.streamingAssistant;
     };
+    if (kind === "turn_completed" || kind === "task_completed") {
+      if (b.streamingAssistant) b.streamingAssistant._streaming = false;
+      b.streamingAssistant = null;
+      return;
+    }
     if (kind === "agent_message_chunk") {
       const chunk = (update.content && update.content.text) || "";
       if (isToolEchoText(chunk) || isAttachmentJunkOnly(chunk)) return;
       const a = ensure();
-      a.text += chunk;
-      a.text = cleanAssistantText(a.text);
+      const join =
+        typeof appendStreamChunk === "function" ? appendStreamChunk : (p, c) => p + c;
+      a.text = cleanAssistantText(join(a.text || "", chunk));
     } else if (kind === "agent_thought_chunk") {
       ensure().thinking += (update.content && update.content.text) || "";
       b.statusPhase = "thinking";
@@ -2164,6 +2246,7 @@
       if (!messageQueue.length) el.statusBar.classList.add("hidden");
       if (streamingAssistant) streamingAssistant._streaming = false;
     }
+    renderQueueDock();
   }
 
   function updateQueueChip() {
@@ -2176,10 +2259,15 @@
     }
     if (messageQueue.length) {
       chip.classList.remove("hidden");
-      chip.textContent = `Kolejka: ${messageQueue.length}`;
+      chip.textContent = `${tr("Queue")}: ${messageQueue.length}`;
+      chip.title = tr("Send queued messages now");
+      chip.style.cursor = "pointer";
+      chip.onclick = () => injectOldestQueued();
     } else {
       chip.classList.add("hidden");
+      chip.onclick = null;
     }
+    renderQueueDock();
   }
 
   /** Strip internal attachment dump from displayed user text. Never show agent-only instructions. */
@@ -2387,51 +2475,31 @@
 
     const atts = attachments.slice();
 
-    // Agent busy → kolejka. Dopowiedzenie = doklej do tej samej pozycji (nie nowa tura).
+    // Agent busy → osobna pozycja w kolejce (nie sklejaj z poprzednią).
     if (busy) {
       const piece = text || tr("(attachment)");
-      const lastQ = messageQueue[messageQueue.length - 1];
-      const lastMsg = lastAll();
-      if (lastQ && (!atts.length || !(lastQ.attachments || []).length)) {
-        // scal tekst + ewent. załączniki
-        if (piece && piece !== tr("(attachment)")) {
-          lastQ.text =
-            lastQ.text && lastQ.text !== tr("(attachment)")
-              ? `${lastQ.text}\n${piece}`
-              : piece;
-        }
-        if (atts.length) {
-          lastQ.attachments = (lastQ.attachments || []).concat(atts);
-        }
-        if (lastMsg && lastMsg.role === "user" && lastMsg._queued) {
-          lastMsg.text = lastQ.text;
-          lastMsg.attachments = lastQ.attachments || [];
-        }
-        showToast(tr("Appended to the queued message"), "ok");
-      } else {
-        messageQueue.push({ text: piece, attachments: atts });
-        pushAll({
-          id: `u-q-${Date.now()}`,
-          role: "user",
-          text: piece,
-          tools: [],
-          attachments: atts,
-          _local: true,
-          _queued: true,
-        });
-        showToast(`${tr("Queue")} (${messageQueue.length})`, "ok");
-      }
+      const qid = `u-q-${Date.now()}-${messageQueue.length}`;
+      messageQueue.push({ id: qid, text: piece, attachments: atts });
+      pushAll({
+        id: qid,
+        role: "user",
+        text: piece,
+        tools: [],
+        attachments: atts,
+        _local: true,
+        _queued: true,
+      });
       if (prefill == null) el.input.value = "";
       attachments = [];
       renderAttachChips();
       autosize();
-      // nie full re-render przy busy — tylko ostatnia bańka (zero skoku scrolla)
-      patchLastUserBubbleFromQueue();
+      appendMessageRows([lastAll()], { stick: true });
       updateQueueChip();
       setStatus(
         "queued",
-        tr("Queued — click ↩ Send now, or wait for the turn to end")
+        tr("Queued — press Send now above the composer, or wait")
       );
+      showToast(`${tr("Queue")} (${messageQueue.length})`, "ok");
       el.input.focus();
       return;
     }
@@ -2446,42 +2514,124 @@
    * Ważne: NIE czyść _queued przed runSendTurn i NIE doklejaj drugiej bańki.
    * Dopisek „Wstrzyknieto…” idzie tylko do API, nie do UI.
    */
+  async function withTimeout(promise, ms) {
+    let t = 0;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, rej) => {
+          t = setTimeout(() => rej(new Error("timeout")), ms);
+        }),
+      ]);
+    } finally {
+      if (t) clearTimeout(t);
+    }
+  }
+
+  function removeQueuedById(id) {
+    messageQueue = messageQueue.filter((q) => q.id !== id);
+    const idx = allMessages.findIndex((m) => m.id === id && m._queued);
+    if (idx >= 0) allMessages.splice(idx, 1);
+    syncVisibleMessages();
+    const row = id
+      ? el.messages.querySelector(`.msg.user[data-msg-id="${cssAttr(id)}"]`)
+      : null;
+    if (row) row.remove();
+    updateQueueChip();
+    layoutChatBottom();
+  }
+
+  function renderQueueDock() {
+    const dock = document.getElementById("queue-dock");
+    if (!dock) return;
+    if (!messageQueue.length) {
+      dock.classList.add("hidden");
+      dock.innerHTML = "";
+      return;
+    }
+    dock.classList.remove("hidden");
+    dock.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "queue-dock-head";
+    const title = document.createElement("span");
+    title.className = "queue-dock-title";
+    title.textContent = `${tr("Waiting to send")} · ${messageQueue.length}`;
+    const sendAll = document.createElement("button");
+    sendAll.type = "button";
+    sendAll.className = "queued-inject";
+    sendAll.textContent = tr("Send now");
+    sendAll.title = tr("Send now — interrupt and fold into current work");
+    sendAll.onclick = () => injectOldestQueued();
+    head.appendChild(title);
+    head.appendChild(sendAll);
+    dock.appendChild(head);
+    for (const item of messageQueue) {
+      const row = document.createElement("div");
+      row.className = "queue-dock-item";
+      const preview = document.createElement("span");
+      preview.className = "queue-dock-preview";
+      const raw = cleanUserText(item.text || "") || tr("(attachment)");
+      preview.textContent = raw.length > 90 ? raw.slice(0, 89) + "…" : raw;
+      const go = document.createElement("button");
+      go.type = "button";
+      go.className = "queue-dock-go";
+      go.textContent = tr("Send");
+      go.onclick = () => injectQueuedNow(item);
+      const rm = document.createElement("button");
+      rm.type = "button";
+      rm.className = "queue-dock-rm";
+      rm.title = tr("Remove from queue");
+      rm.textContent = "×";
+      rm.onclick = () => removeQueuedById(item.id);
+      row.appendChild(preview);
+      row.appendChild(go);
+      row.appendChild(rm);
+      dock.appendChild(row);
+    }
+  }
+
+  async function injectOldestQueued() {
+    const first = messageQueue[0];
+    if (!first) return;
+    const msg = allMessages.find((m) => m.id === first.id) || first;
+    await injectQueuedNow(msg);
+  }
+
   async function injectQueuedNow(msg) {
     const text = cleanUserText(msg?.text || "");
     const atts = (msg && msg.attachments) || [];
     if (!text && !atts.length) return;
 
-    // zdejmij z kolejki (treść jest w bańce / msg)
-    messageQueue = [];
+    const keepId = msg.id;
+    messageQueue = messageQueue.filter((q) => q.id !== keepId);
     updateQueueChip();
 
-    // stop bieżącej tury
     try {
-      await api.chatStop({ mode });
+      await withTimeout(api.chatStop({ mode }), 4000);
     } catch {
-      /* ignore */
+      /* stop hung — send anyway */
     }
     setBusy(false);
     busySessionId = null;
-    if (streamingAssistant) streamingAssistant._streaming = false;
-    streamingAssistant = null;
+    closeStreamingAssistant();
 
-    // Zostaw _queued na bańce — runSendTurn ma ją ZREUSE'ować, nie sklonować.
-    // Dopisek tylko w payloadzie do agenta.
     const payload =
       (text || tr("(attachment)")) +
       "\n\n[Injected mid-work — fold this into the current task, do not start over.]";
 
-    // zdejmij badge „w kolejce” z DOM (tekst bańki bez zmian)
-    const rows = el.messages.querySelectorAll(".msg.user");
-    const lastUser = rows[rows.length - 1];
-    if (lastUser) {
-      lastUser.querySelector(".queued-actions")?.remove();
-      lastUser.querySelector(".queued-badge")?.remove();
+    const row = keepId
+      ? el.messages.querySelector(`.msg.user[data-msg-id="${cssAttr(keepId)}"]`)
+      : null;
+    if (row) {
+      row.querySelector(".queued-actions")?.remove();
+      row.querySelector(".queued-badge")?.remove();
     }
 
     showToast(tr("Sending now (current turn interrupted)"), "ok");
-    await runSendTurn(payload, atts, false, { reuseQueuedBubble: true });
+    await runSendTurn(payload, atts, false, {
+      reuseQueuedBubble: true,
+      queuedId: keepId,
+    });
   }
 
   /**
@@ -2498,11 +2648,18 @@
 
     // Znajdź bańkę z kolejki do reuse (nie klonuj po wysłaniu)
     let queuedBubble = null;
+    if (opts.queuedId) {
+      queuedBubble =
+        allMessages.find((m) => m.id === opts.queuedId && m.role === "user") ||
+        null;
+    }
     // 1) jawna flaga _queued (preferuj najnowszą)
-    for (let i = allMessages.length - 1; i >= 0; i--) {
-      if (allMessages[i].role === "user" && allMessages[i]._queued) {
-        queuedBubble = allMessages[i];
-        break;
+    if (!queuedBubble) {
+      for (let i = allMessages.length - 1; i >= 0; i--) {
+        if (allMessages[i].role === "user" && allMessages[i]._queued) {
+          queuedBubble = allMessages[i];
+          break;
+        }
       }
     }
     // 2) inject: ta sama lokalna bańka usera o tym tekście (gdy flaga już spadła)
@@ -2690,6 +2847,7 @@
       el.input.focus();
     }
     if (typeof refreshUsage === "function") refreshUsage();
+    if (streamingAssistant) streamingAssistant._streaming = false;
     await drainQueue();
   }
 
@@ -2742,36 +2900,10 @@
     if (stickToBottom) scrollChatToBottom();
   }
 
-  /** Zlej całą kolejkę w jedną wiadomość (dopowiedzenia = jedna tura, nie N). */
-  function coalesceQueue() {
+  /** Weź następną pozycję z kolejki — każda wiadomość to osobna tura. */
+  function takeNextQueued() {
     if (!messageQueue.length) return null;
-    const items = messageQueue.splice(0, messageQueue.length);
-    const texts = [];
-    const atts = [];
-    for (const it of items) {
-      const t = (it.text || "").trim();
-      if (t && t !== tr("(attachment)")) texts.push(t);
-      if (it.attachments && it.attachments.length) {
-        atts.push(...it.attachments);
-      }
-    }
-    // UI: jedna bańka „w kolejce” (zostaje _queued → runSendTurn nie dubluje)
-    const queuedBubbles = allMessages.filter((m) => m._queued && m.role === "user");
-    if (queuedBubbles.length) {
-      const keep = queuedBubbles[0];
-      keep.text = texts.join("\n") || tr("(attachment)");
-      keep.attachments = atts;
-      for (let i = 1; i < queuedBubbles.length; i++) {
-        const id = queuedBubbles[i].id;
-        const idx = allMessages.findIndex((m) => m.id === id);
-        if (idx >= 0) allMessages.splice(idx, 1);
-      }
-      syncVisibleMessages();
-    }
-    return {
-      text: texts.join("\n") || tr("(attachment)"),
-      attachments: atts,
-    };
+    return messageQueue.shift();
   }
 
   async function drainQueue() {
@@ -2781,23 +2913,16 @@
       return;
     }
     drainingQueue = true;
+    const next = takeNextQueued();
     updateQueueChip();
-    setStatus("queued", tr("Queue → one message…"));
-    const merged = coalesceQueue();
-    updateQueueChip();
-    if (merged) {
-      await runSendTurn(merged.text, merged.attachments || [], false);
-    }
-    // gdy w trakcie tury znów coś wpadło do kolejki
-    while (messageQueue.length && !busy) {
-      const again = coalesceQueue();
-      updateQueueChip();
-      if (!again) break;
-      setStatus("queued", tr("Queue → one message…"));
-      await runSendTurn(again.text, again.attachments || [], false);
-    }
     drainingQueue = false;
-    updateQueueChip();
+    if (next) {
+      setStatus("queued", tr("Sending next queued message…"));
+      await runSendTurn(next.text, next.attachments || [], false, {
+        reuseQueuedBubble: true,
+        queuedId: next.id,
+      });
+    }
   }
 
   async function persistHomeView() {
@@ -3033,12 +3158,22 @@
   });
   el.form.onsubmit = (e) => {
     e.preventDefault();
+    const empty = !el.input.value.trim() && !attachments.length;
+    if (empty && messageQueue.length) {
+      injectOldestQueued();
+      return;
+    }
     sendMessage();
   };
   el.input.addEventListener("input", autosize);
   el.input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      const empty = !el.input.value.trim() && !attachments.length;
+      if (empty && messageQueue.length) {
+        injectOldestQueued();
+        return;
+      }
       sendMessage();
     }
   });

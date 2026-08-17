@@ -119,6 +119,35 @@ group("markdown: bloki kodu i bezpieczeństwo");
     assert.ok(out.includes("<th>A</th>"));
     assert.ok(!out.includes("|---"));
   });
+
+  test("sklejone zdania ze streamu rozbijają się na akapity", () => {
+    const { renderMarkdown, appendStreamChunk } = require("../src/markdown.js");
+    const glued = "na VPS.Praca siedzi na boxie.Jest nowszy handover.";
+    const out = renderMarkdown(glued);
+    const paras = out.match(/<p>/g) || [];
+    assert.ok(paras.length >= 3, "ściana tekstu nie rozbita: " + out);
+    assert.ok(out.includes("na VPS."));
+    assert.ok(out.includes("Praca siedzi"));
+
+    const joined = appendStreamChunk("na VPS.", "Praca siedzi na boxie.");
+    assert.ok(joined.includes("\n\n"), "chunki bez spacji nie dostały akapitu");
+    assert.ok(!joined.includes("VPS.Praca"));
+  });
+
+  test("appendStreamChunk nie psuje już poprawnych spacji", () => {
+    const { appendStreamChunk } = require("../src/markdown.js");
+    assert.strictEqual(
+      appendStreamChunk("Hello. ", "World"),
+      "Hello.\n\nWorld"
+    );
+    assert.strictEqual(appendStreamChunk("abc", "def"), "abc def");
+  });
+
+  test("kod w fence nie jest rozbijany na akapity", () => {
+    const out = renderMarkdown("```js\nfoo.Bar = 1;\n```");
+    assert.ok(out.includes("foo.Bar = 1;"), "identyfikator w kodzie rozbity");
+    assert.ok(!out.includes("<p>Bar"), "Bar wyciekł do akapitu");
+  });
 }
 
 /* ── 2b. Wideo i media w UI ───────────────────────────────────────────
@@ -550,6 +579,37 @@ group("chat-history: dół sesji i merge po transkrypcie");
     const out = ch.mergeTranscriptWithLocals(mapped, current);
     assert.strictEqual(out[out.length - 2].text, "nowe pytanie");
     assert.strictEqual(out[out.length - 1]._streaming, true);
+  });
+
+  test("nowa tura nie dopisuje do poprzedniej bańki asystenta", () => {
+    const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+    assert.ok(
+      /function closeStreamingAssistant/.test(app),
+      "brak closeStreamingAssistant"
+    );
+    assert.ok(
+      /turn_completed/.test(app),
+      "ACP turn_completed jest ignorowane — nowa tura sklei się ze starą"
+    );
+    assert.ok(
+      /after !== streamingAssistant/.test(app),
+      "ensureStreamingAssistant nie odpuszcza starej bańki po wiadomości usera"
+    );
+  });
+
+  test("kolejka ma dock nad composerem i nie scala pozycji", () => {
+    const html = fs.readFileSync(path.join(ROOT, "src", "index.html"), "utf8");
+    const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+    assert.ok(/id="queue-dock"/.test(html), "brak #queue-dock");
+    assert.ok(/function renderQueueDock/.test(app), "brak renderQueueDock");
+    assert.ok(
+      /function injectOldestQueued/.test(app),
+      "brak injectOldestQueued — nie da się pchnąć kolejki"
+    );
+    assert.ok(
+      /messageQueue\.push/.test(app) && !/lastQ\.text =/.test(app),
+      "kolejne dopowiedzenia nadal sklejają się w jedną pozycję"
+    );
   });
 
   test("openSession nie czyści allMessages przed transkryptem", () => {

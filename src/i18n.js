@@ -26,6 +26,7 @@ const PL = {
   Search: "Szukaj",
   "Recents · Home": "Ostatnie · Home",
   "Recents · Build": "Ostatnie · Build",
+  Build: "Build",
   "No Home chats yet — write below": "Brak czatów Home — napisz poniżej",
   "No Build sessions": "Brak sesji Build",
   "How can I help you today?": "W czym mogę pomóc?",
@@ -114,6 +115,7 @@ const PL = {
   // Kolejka
   queued: "w kolejce",
   "↩ Send now": "↩ Wyślij teraz",
+  "Send now": "Wyślij teraz",
   "Send now — interrupt and fold into current work":
     "Wyślij teraz — przerwij i dołącz do bieżącej roboty",
   "Sending now (current turn interrupted)":
@@ -121,6 +123,12 @@ const PL = {
   "Appended to the queued message": "Doklejone do kolejki (1 wiadomość)",
   "Queued — click ↩ Send now, or wait for the turn to end":
     "W kolejce — kliknij ↩ Wyślij teraz, albo poczekaj na koniec tury",
+  "Queued — press Send now above the composer, or wait":
+    "W kolejce — kliknij Wyślij teraz nad polem, albo poczekaj",
+  "Send queued messages now": "Wyślij teraz wiadomości z kolejki",
+  "Waiting to send": "Czeka na wysłanie",
+  "Remove from queue": "Usuń z kolejki",
+  "Sending next queued message…": "Wysyłam następną z kolejki…",
   Queue: "Kolejka",
 
   // Akcje pod wiadomością
