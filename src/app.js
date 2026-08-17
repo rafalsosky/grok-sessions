@@ -3010,6 +3010,10 @@
           buf.statusDetail = res.ok ? "" : String(res.error || "").slice(0, 120);
         }
       }
+      // Flaga busy trybu — zdejmij tylko wtedy, gdy NIC już nie pracuje.
+      // Inaczej koniec tury A gasiłby wskaźnik pracy sesji B.
+      if (turnMode === "home") setBusy(false, "home");
+      else if (!busySessionIds.size) setBusy(false, "grok");
       if (!res.ok) showToast(res.error || tr("Send failed"), "error");
       await refresh();
       if (typeof refreshUsage === "function") refreshUsage();

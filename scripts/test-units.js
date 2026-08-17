@@ -1137,6 +1137,11 @@ group("markdown: struktura jak w źródle, nie sitko akapitów");
     assert.strictEqual((out.match(/<li>/g) || []).length, 2, out);
     assert.ok(!/<p>/.test(out), "ciąg dalszy punktu wypadł z listy: " + out);
   });
+  test("numerowany nagłówek zostaje nagłówkiem, nie listą po „###”", () => {
+    const out = renderMarkdown("### 1. Jedna sesja, nie dwie");
+    assert.ok(/md-h/.test(out), "nagłówek rozbity na listę: " + out);
+    assert.ok(!/<p>###<\/p>/.test(out), "samotne ### w czacie: " + out);
+  });
   test("łamacz nie przemyca HTML-a", () => {
     const out = renderMarkdown("a  \n<img src=x onerror=alert(1)>");
     assert.ok(!out.includes("<img"), out);

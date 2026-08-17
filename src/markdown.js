@@ -66,9 +66,10 @@ function normalizeMarkdown(src) {
   // Ensure each table row on own line when multiple | segments
   // (already partly handled by ||)
 
-  // List items glued after text
-  t = t.replace(/([^\n])\s+([-*]\s+\S)/g, "$1\n$2");
-  t = t.replace(/([^\n])\s+(\d+\.\s+\S)/g, "$1\n$2");
+  // List items glued after text. `#` wyłączone: „### 1. Tytuł” to nagłówek,
+  // nie lista — inaczej samotne „###” zostawało w czacie jako tekst.
+  t = t.replace(/([^\n#])\s+([-*]\s+\S)/g, "$1\n$2");
+  t = t.replace(/([^\n#])\s+(\d+\.\s+\S)/g, "$1\n$2");
 
   // HR
   t = t.replace(/([^\n|-])\s*(---)\s*([^\n|-])/g, "$1\n\n$2\n\n$3");
@@ -79,9 +80,11 @@ function normalizeMarkdown(src) {
   // „pogrubiony tekst nie wiadomo skąd” i dziury między zdaniami.
   t = t.replace(/([.!?])[ \t]*\n[ \t]*(\*\*[^*\n]{2,50}\*\*)/g, "$1\n\n$2");
 
-  // Numbered steps "1. Foo 2. Bar" and glued "resetować.1. SuperGrok"
-  t = t.replace(/(\S)\s+(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
-  t = t.replace(/([^\n\d])(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
+  // Numbered steps "1. Foo 2. Bar" and glued "resetować.1. SuperGrok".
+  // Nie odrywaj numeru od znacznika nagłówka: „### 1. Jedna sesja” zostawiało
+  // samotne „###” jako tekst w czacie.
+  t = t.replace(/([^\s#])\s+(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
+  t = t.replace(/(?<!#)([^\n\d])(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
 
   t = t.replace(/\n{3,}/g, "\n\n");
   return t.trim();
