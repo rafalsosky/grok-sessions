@@ -730,6 +730,12 @@ async function sendCodeChat({ text, sessionId, cwd, attachments }) {
       const created = await client.ensureSession({ cwd: workCwd });
       sid = created.sessionId;
       pool.put(sid, client);
+      // Nowa sesja poznaje swoje sid DOPIERO tutaj. Bez tego sygnału lista
+      // dostawała „pracuje” z sid=null i świeża karta przez całą pierwszą turę
+      // stała bez wskaźnika pracy — nie było widać, która sesja liczy.
+      pool.markBusy(sid, true);
+      send("chat:busy", { busy: true, sessionId: sid, mode: "grok" });
+      pushSessions();
     }
   }
 

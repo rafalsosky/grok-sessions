@@ -698,6 +698,47 @@ group("chat-history: dół sesji i merge po transkrypcie");
     assert.strictEqual(out[out.length - 1].text, "Spoko, zrobiłem restart");
   });
 
+  test("ta sama odpowiedz nie maluje sie dwa razy po powrocie do sesji", () => {
+    // Tura skonczyla sie, gdy user patrzyl na inna karte. Banka w widoku
+    // zostala z flaga _streaming, a transkrypt z dysku ma juz ten sam tekst.
+    const zDysku = [
+      { role: "user", text: "czy mozesz dzialac w kilku sesjach na raz" },
+      { role: "assistant", text: "Moge, ale nie tak, jakby jedna glowa siedziala we wszystkich oknach." },
+    ];
+    const zywe = [
+      { role: "user", text: "czy mozesz dzialac w kilku sesjach na raz", _local: true },
+      { role: "assistant", text: "Moge, ale nie tak, jakby jedna glowa siedziala we wszystkich oknach.", _streaming: true },
+    ];
+    const out = ch.mergeTranscriptWithLocals(zDysku, zywe);
+    assert.strictEqual(out.filter((m) => m.role === "assistant").length, 1, "zdublowana odpowiedz: " + JSON.stringify(out));
+    assert.strictEqual(out.filter((m) => m.role === "user").length, 1, "zdublowane pytanie");
+  });
+
+  test("stream w polowie nie dubluje pelnej odpowiedzi z transkryptu", () => {
+    const zDysku = [{ role: "assistant", text: "Moge, ale nie tak jak myslisz. Kazda rozmowa jest osobna." }];
+    const zywe = [{ role: "assistant", text: "Moge, ale nie tak", _streaming: true }];
+    const out = ch.mergeTranscriptWithLocals(zDysku, zywe);
+    assert.strictEqual(out.length, 1, "prefiks streamu doklejony obok pelnego tekstu: " + JSON.stringify(out));
+  });
+
+  test("nowa, inna odpowiedz nadal wchodzi", () => {
+    const zDysku = [{ role: "assistant", text: "stara odpowiedz" }];
+    const zywe = [{ role: "assistant", text: "zupelnie nowy tekst", _streaming: true }];
+    const out = ch.mergeTranscriptWithLocals(zDysku, zywe);
+    assert.strictEqual(out.length, 2, "zywy stream zjedzony przez dedupe");
+  });
+
+  test("app.js zdejmuje flage _streaming z calej sesji, nie z jednego obiektu", () => {
+    const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+    assert.ok(/function clearStreamingFlags/.test(app), "brak clearStreamingFlags");
+    const fn = app.match(/function clearStreamingFlags[\s\S]*?\n  \}/);
+    assert.ok(/for \(const m of buf\.allMessages/.test(fn[0]), "czysci tylko sledzony obiekt");
+    assert.ok(
+      /clearStreamingFlags\(sessionId\)/.test(app),
+      "chat:busy=false nie czysci flag sesji"
+    );
+  });
+
   test("przełączenie sesji nie wlewa czatu A do czatu B", () => {
     const liveB = [
       { role: "user", text: "zadanie B", _sid: "b" },

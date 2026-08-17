@@ -50,19 +50,29 @@
     out.push(m);
   }
 
+  /**
+   * Ta sama treść nie ma prawa wejść drugi raz — nawet gdy bańka wciąż ma
+   * flagę _streaming. Wcześniej `m._streaming ||` przepuszczało ją bezwarunkowo:
+   * tura kończyła się, gdy user patrzył na inną kartę, flaga zostawała, a po
+   * powrocie transkrypt Z DYSKU i ta sama żywa bańka malowały się OBIE.
+   * Stąd dwie identyczne odpowiedzi Groka pod jednym pytaniem.
+   * Prefiks liczy się jako duplikat: stream w połowie to początek tekstu,
+   * który w transkrypcie jest już cały.
+   */
   function mergeTranscriptWithLocals(mapped, current) {
     const base = Array.isArray(mapped) ? mapped.slice() : [];
     const extras = (current || []).filter((m) => m && (m._local || m._streaming));
     if (!extras.length) return base;
-    const seen = new Set(base.map(msgText).filter(Boolean));
+    const seenTexts = base.map(msgText).filter(Boolean);
     const out = base.slice();
+    const duplikat = (t) =>
+      Boolean(t) && seenTexts.some((b) => b === t || b.startsWith(t));
     for (const m of extras) {
       const t = msgText(m);
-      if (m._streaming || !t || !seen.has(t)) {
-        if (m.role === "user" && m._local) placeLocalUser(out, m);
-        else out.push(m);
-        if (t) seen.add(t);
-      }
+      if (duplikat(t)) continue;
+      if (m.role === "user" && m._local) placeLocalUser(out, m);
+      else out.push(m);
+      if (t) seenTexts.push(t);
     }
     return out;
   }

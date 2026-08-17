@@ -687,7 +687,7 @@
                   : ""
             }
           </div>`;
-        li.querySelector(".title").textContent = r.title;
+        li.querySelector(".title").textContent = displayTitle(r);
         const liveDot = li.querySelector(".live-dot");
         if (liveDot) {
           liveDot.title = isWorking
@@ -1519,7 +1519,7 @@
 
     renderList();
     if (selectedRow()) {
-      el.wsTitle.textContent = selectedRow().title;
+      el.wsTitle.textContent = displayTitle(selectedRow());
       updatePathChips(selectedRow().cwd);
     }
   }
@@ -1560,6 +1560,54 @@
     };
   }
 
+  /**
+   * Tytuł z pierwszej wiadomości usera, trzymany w oknie.
+   * Skan dysku bierze go z updates.jsonl, ale agent zapisuje ten plik
+   * z opóźnieniem — przez kilka sekund świeża karta stała jako „01a00f2c”.
+   */
+  const localTitles = Object.create(null);
+
+  function rememberLocalTitle(sid) {
+    if (!sid || localTitles[sid]) return;
+    const first = allMessages.find(
+      (m) => m && m.role === "user" && String(m.text || "").trim()
+    );
+    if (!first) return;
+    const t = String(first.text).replace(/\s+/g, " ").trim();
+    if (t.length < 2) return;
+    localTitles[sid] = t.length > 48 ? t.slice(0, 47).trimEnd() + "…" : t;
+  }
+
+  /** Skan oddał sam skrót uuid — użyj tego, co user właśnie napisał. */
+  function displayTitle(row) {
+    if (!row) return "";
+    if (localTitles[row.id] && /^[0-9a-f]{8}$/i.test(String(row.title))) {
+      return localTitles[row.id];
+    }
+    return row.title;
+  }
+
+  /**
+   * Koniec tury = zero baniek z flagą _streaming w TEJ sesji.
+   * `streamingAssistant` w trakcie tury bywa podmieniany (follow-up, pusta
+   * skorupa), więc czyszczenie samego śledzonego obiektu zostawiało w tablicy
+   * bańkę z flagą. Po powrocie do sesji merge dokładał ją obok tej samej
+   * treści z transkryptu — dwie identyczne odpowiedzi.
+   */
+  function clearStreamingFlags(sid) {
+    if (!sid) return;
+    const buf = streamBySession[sid];
+    if (buf) {
+      for (const m of buf.allMessages || []) if (m) m._streaming = false;
+      if (buf.streamingAssistant) buf.streamingAssistant._streaming = false;
+      buf.streamingAssistant = null;
+    }
+    if (isViewingSession(sid)) {
+      for (const m of allMessages) if (m) m._streaming = false;
+      streamingAssistant = null;
+    }
+  }
+
   function stampSessionId(sid) {
     if (!sid) return;
     for (const m of allMessages) {
@@ -1584,6 +1632,7 @@
     liveSessionId = sid;
     pendingNewSession = false;
     stampSessionId(sid);
+    rememberLocalTitle(sid);
     snapshotCurrentBuildSession();
     persistNav();
     renderList();
@@ -1624,8 +1673,8 @@
     // Kliknięcie w istniejącą kartę kończy stan „czekam na sid nowego czatu”.
     // Zawieszona flaga pozwalała później przygarnąć cudzy sid.
     pendingNewSession = false;
-    el.wsTitle.textContent = row.title;
-    bag().wsTitle = row.title;
+    el.wsTitle.textContent = displayTitle(row);
+    bag().wsTitle = displayTitle(row);
     updatePathChips(row.cwd);
     renderList();
 
@@ -2154,7 +2203,10 @@
 
     if (kind === "turn_completed" || kind === "task_completed") {
       closeStreamingAssistant();
-      if (sid) snapshotCurrentBuildSession();
+      if (sid) {
+        snapshotCurrentBuildSession();
+        clearStreamingFlags(sid);
+      }
       return;
     }
 
@@ -3038,6 +3090,7 @@
     if (res.sessionId) {
       liveSessionId = res.sessionId;
       selectedId = res.sessionId;
+      rememberLocalTitle(res.sessionId);
     }
     if (turnAssistant) turnAssistant._streaming = false;
 
@@ -3634,12 +3687,7 @@
     }
     if (sessionId) setSessionBusy(sessionId, b);
     if (sessionId && b) adoptBuildSession(sessionId);
-    if (sessionId && !b) {
-      const buf = streamBySession[sessionId];
-      if (buf && buf.streamingAssistant) {
-        buf.streamingAssistant._streaming = false;
-      }
-    }
+    if (sessionId && !b) clearStreamingFlags(sessionId);
     const viewingThis =
       sessionId && isViewingSession(sessionId);
     if (mode === "home") {
