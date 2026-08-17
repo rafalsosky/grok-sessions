@@ -17,6 +17,7 @@
 
 const path = require("path");
 const http = require("http");
+const fs = require("fs");
 const { spawn } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
@@ -174,6 +175,23 @@ async function czekajNaKoniec(k, maxS = 120) {
   return false;
 }
 
+/**
+ * Czekaj, az ostatnia banka asystenta NAPRAWDE ma tresc. Sam pasek pracy
+ * nie wystarcza: przy turze z narzedziami gasnie na chwile miedzy fazami,
+ * a test czytal wtedy pusta banke i zglaszal blad apki, ktorego nie bylo.
+ */
+async function czekajNaTresc(k, maxS = 150) {
+  for (let i = 0; i < maxS * 2; i++) {
+    const t = await k.oceń(
+      `(() => { const a = [...document.querySelectorAll("#messages .msg.assistant .msg-content")];
+        return a.length ? a[a.length - 1].textContent.trim().length : 0; })()`
+    );
+    if (t > 5) return true;
+    await sleep(500);
+  }
+  return false;
+}
+
 function duplikaty(banki) {
   const zle = [];
   for (let i = 1; i < banki.length; i++) {
@@ -220,8 +238,9 @@ async function scenariusze(k) {
     )
   );
   await sleep(4000);
-  const skonczyla = await czekajNaKoniec(k, 120);
-  sprawdz("tura z narzędziami kończy się", skonczyla, "pasek pracy nie zgasł w 120 s");
+  const maTresc = await czekajNaTresc(k, 150);
+  sprawdz("tura z narzędziami dowozi treść", maTresc, "bańka pusta po 150 s");
+  await czekajNaKoniec(k, 120);
   await sleep(1500);
   const b1 = await k.oceń(JS.banki);
   const asyst = b1.filter((x) => x.r === "grok");
@@ -325,7 +344,8 @@ async function scenariusze(k) {
   /* 6. Follow-up ląduje na końcu */
   console.log("\n5. follow-up na końcu");
   await k.oceń(JS.wyslij("Napisz doslownie: FOLLOW-UP-OK"));
-  await czekajNaKoniec(k, 90);
+  await czekajNaTresc(k, 90);
+  await czekajNaKoniec(k, 60);
   const b6 = await k.oceń(JS.banki);
   const idxUser = b6.map((x) => x.r).lastIndexOf("user");
   sprawdz(
@@ -367,7 +387,28 @@ async function scenariusze(k) {
 
 /* ── główna pętla ────────────────────────────────────────────────────── */
 
+/**
+ * Zasiej profil testowy. Bez tego swieza instancja startuje z pustym
+ * katalogiem roboczym i narzedzia agenta lecą nie tam, gdzie trzeba —
+ * przebiegi robily sie losowe („0 plikow w src").
+ */
+function zasiejProfil() {
+  fs.mkdirSync(UDD, { recursive: true });
+  fs.writeFileSync(
+    path.join(UDD, "settings.json"),
+    JSON.stringify(
+      // Tylko to, co naprawde potrzebne. Kazde dodatkowe pole zwieksza szanse,
+      // ze test bada wlasna konfiguracje zamiast aplikacji.
+      { defaultCwd: ROOT, permissionMode: "auto" },
+      null,
+      2
+    ),
+    "utf8"
+  );
+}
+
 (async () => {
+  zasiejProfil();
   const proc = spawn(ELECTRON, [ROOT, `--remote-debugging-port=${PORT}`], {
     cwd: ROOT,
     stdio: "ignore",

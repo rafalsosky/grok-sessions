@@ -422,6 +422,15 @@ function wireClient(client) {
     const high = modelsLib.highestChatModelId(
       m.availableModels || client.models
     );
+    // NIGDY na zywej sesji. ensureSession samo emituje "models", wiec ten
+    // handler wchodzil W TRAKCIE zakladania sesji i probowal przestawic model
+    // dwoma zapytaniami, ktorych agent nie obsluguje (po 120 s timeoutu kazde),
+    // a potem restartowal proces. To byly te 42 s na „New Build session…".
+    // Proces i tak startuje z `--model`, wiec nowa sesja dostanie wlasciwy.
+    if (sid || client.sessionId) {
+      pushSessions();
+      return;
+    }
     if (high && client.currentModelId !== high && !client._switchingLatest) {
       client._switchingLatest = true;
       try {

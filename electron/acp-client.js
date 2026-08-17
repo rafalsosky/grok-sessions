@@ -378,20 +378,24 @@ class AcpClient extends EventEmitter {
     // Many agents need restart to change default model for new sessions.
     // Try extension methods first; if none, restart process.
     try {
-      await this.request("session/set_model", {
-        sessionId: this.sessionId,
-        modelId,
-      });
+      // Krotki timeout: to zapytanie OPCJONALNE. Domyslne 120 s zamrazalo
+      // aplikacje, gdy agent go nie obsluguje i po prostu nie odpowiada.
+      await this.request(
+        "session/set_model",
+        { sessionId: this.sessionId, modelId },
+        { timeoutMs: 4000 }
+      );
       this.currentModelId = modelId;
       return { ok: true, method: "session/set_model" };
     } catch {
       /* fall through */
     }
     try {
-      await this.request("x.ai/model/set", {
-        sessionId: this.sessionId,
-        modelId,
-      });
+      await this.request(
+        "x.ai/model/set",
+        { sessionId: this.sessionId, modelId },
+        { timeoutMs: 4000 }
+      );
       this.currentModelId = modelId;
       return { ok: true, method: "x.ai/model/set" };
     } catch {
