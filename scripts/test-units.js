@@ -523,6 +523,17 @@ group("xai-api: reasoning_effort i delty myślenia");
       /awaitingOwnNewSession\(\) && busySessionIds\.size <= 1/.test(app),
       "pierwszy chunk nowej sesji znowu leci offscreen"
     );
+    const acp = fs.readFileSync(path.join(ROOT, "electron", "acp-client.js"), "utf8");
+    assert.ok(
+      /caps\.resume === true/.test(acp),
+      "resume znowu leci zawsze i wisi 8 s"
+    );
+    const cancel = acp.match(/async cancel\([\s\S]*?\n  \}/);
+    assert.ok(cancel, "brak cancel");
+    assert.ok(
+      /pending\.delete/.test(cancel[0]),
+      "Stop nie zamyka session/prompt"
+    );
   });
 
   test("Home nie gubi thought chunków i nie pisze Writing przed pierwszym tokenem", () => {

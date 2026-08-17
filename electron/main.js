@@ -553,8 +553,9 @@ async function sendHomeChat({
   const settings = getSettings();
   const token = xai.getAccessToken(settings.grokHome || resolveGrokHome());
   if (!token) throw new Error("No xAI token — sign in with: grok login");
-  homeAbort = new AbortController();
-  const signal = homeAbort.signal;
+  const mine = new AbortController();
+  homeAbort = mine;
+  const signal = mine.signal;
 
   let chat = sessionId ? homeChats.loadHomeChat(userDataDir(), sessionId) : null;
   if (!chat) chat = homeChats.createHomeChat(userDataDir());
@@ -818,6 +819,8 @@ async function sendHomeChat({
   } catch (err) {
     persistFail(err);
     throw err;
+  } finally {
+    if (homeAbort === mine) homeAbort = null;
   }
 }
 
@@ -1099,7 +1102,8 @@ function registerIpc() {
     } finally {
       if (lane === "home") {
         promptBusy.home = false;
-        homeAbort = null;
+        // Nie zeruj homeAbort tutaj: finally starej tury ubijało kontroler
+        // nowej, jeśli user wcisnął Stop i od razu Enter.
       } else if (outSid) {
         pool.markBusy(outSid, false);
       }

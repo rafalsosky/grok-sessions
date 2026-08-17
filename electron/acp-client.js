@@ -281,8 +281,9 @@ class AcpClient extends EventEmitter {
       // replays every historical chunk into the live bubble. Prefer resume
       // when the agent advertises it; fall back to a gated load.
       const caps = this.agentCapabilities.sessionCapabilities || {};
-      const resumeFirst = caps.resume !== false;
+      const resumeFirst = caps.resume === true;
       if (resumeFirst) {
+        this._loading = true;
         try {
           const res = await this.request("session/resume", params, {
             timeoutMs: 8000,
@@ -292,6 +293,8 @@ class AcpClient extends EventEmitter {
           return { sessionId, ...res };
         } catch {
           /* fall through to load */
+        } finally {
+          this._loading = false;
         }
       }
       this._loading = true;
@@ -381,8 +384,8 @@ class AcpClient extends EventEmitter {
           sessionId: sid,
           cwd: workCwd,
         });
-      } catch {
-        /* new session if load fails */
+      } catch (err) {
+        return { ok: false, error: err.message, effort: this.reasoningEffort };
       }
     }
     return { ok: true, effort: this.reasoningEffort };
@@ -428,8 +431,8 @@ class AcpClient extends EventEmitter {
     if (sid) {
       try {
         await this.ensureSession({ sessionId: sid, cwd: workCwd });
-      } catch {
-        /* nowa sesja, gdy load nie wyjdzie */
+      } catch (err) {
+        return { ok: false, error: err.message, method: "restart" };
       }
     }
     return { ok: true, method: "restart" };
@@ -449,10 +452,16 @@ class AcpClient extends EventEmitter {
           params: { sessionId: sid },
         }) + "\n"
       );
-      return true;
     } catch {
       return false;
     }
+    // Stop musi zamknąć session/prompt. Inaczej UI jest wolne, a stara
+    // tura jeszcze 600 s sypie chunki w następną wiadomość.
+    for (const [id, p] of this.pending) {
+      this.pending.delete(id);
+      p.reject(new Error("Stopped"));
+    }
+    return true;
   }
 
   async stop() {
