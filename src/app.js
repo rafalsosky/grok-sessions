@@ -1568,9 +1568,9 @@
     if (!sid) return false;
     if (detachedBuild) return false;
     if (mode !== "grok") return false;
-    if (selectedId === sid) return true;
-    // First send of a new chat: selectedId is still null
-    if (pendingNewSession && !selectedId) return true;
+    if (selectedId === sid || liveSessionId === sid) return true;
+    // Nowy czat: bierzemy tylko sid, którego jeszcze nie ma inna karta
+    if (pendingNewSession && !selectedId && !streamBySession[sid]) return true;
     return false;
   }
 
@@ -1602,13 +1602,18 @@
     renderList();
 
     const live = streamBySession[row.id];
-    const hasLiveWork = Boolean(live && isSessionBusy(row.id));
+    const hasOwnStream = Boolean(
+      live &&
+        (live.streamingAssistant ||
+          (live.allMessages || []).some((m) => m && m._streaming))
+    );
+    const hasLiveWork = Boolean(live && isSessionBusy(row.id) && hasOwnStream);
 
     if (hasLiveWork) {
-      const mergeLive =
-        chatHistory.mergeLiveBufferWithLocals ||
-        ((a, b) => (a || []).concat(b || []));
-      allMessages = mergeLive(live.allMessages || [], allMessages, row.id);
+      const loadView =
+        chatHistory.loadSessionView ||
+        ((a) => (a || []).slice());
+      allMessages = loadView(live.allMessages || [], allMessages, row.id);
       streamingAssistant =
         live.streamingAssistant ||
         allMessages.find((m) => m.role === "assistant" && m._streaming) ||
@@ -1703,11 +1708,16 @@
     );
     const merge =
       chatHistory.mergeTranscriptWithLocals || ((a, b) => a.concat(b || []));
-    const extras = allMessages.filter((m) => {
-      if (!(m._local || m._streaming)) return false;
-      return !m._sid || m._sid === row.id;
-    });
-    allMessages = merge(cleaned, extras);
+    const extras = allMessages.filter(
+      (m) => m && (m._local || m._streaming) && m._sid === row.id
+    );
+    const fromBuf = ((streamBySession[row.id] &&
+      streamBySession[row.id].allMessages) ||
+      []).filter((m) => m && (m._local || m._streaming) && m._sid === row.id);
+    allMessages = merge(cleaned, extras.concat(fromBuf));
+    for (const m of allMessages) {
+      if (!m._sid) m._sid = row.id;
+    }
     holdStick(1200);
     syncVisibleMessages();
     renderMessages({ forceScroll: true });

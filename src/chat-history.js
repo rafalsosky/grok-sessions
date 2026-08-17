@@ -99,11 +99,27 @@ function isOrphanLocalForSession(m, sid) {
   return !m._sid || m._sid === sid;
 }
 
+/**
+ * Widok jednej sesji. Cudzy czat (dłuższy, bez _sid, inny _sid) nie wchodzi.
+ * Przy przełączaniu A→B dawny merge brał dłuższą historię A i pokazywał
+ * ją jako B — stąd ta sama odpowiedź w obu kartach.
+ */
+function loadSessionView(liveMsgs, current, sid) {
+  const live = Array.isArray(liveMsgs) ? liveMsgs.slice() : [];
+  const extras = (current || []).filter((m) => {
+    if (!m || !(m._local || m._streaming)) return false;
+    return Boolean(sid && m._sid === sid);
+  });
+  if (!live.length) return extras.slice();
+  return mergeTranscriptWithLocals(live, extras);
+}
+
 const api = {
   contentHeightWithoutPad,
   nextChatPadding,
   mergeTranscriptWithLocals,
   mergeLiveBufferWithLocals,
+  loadSessionView,
   isOrphanLocalForSession,
 };
 

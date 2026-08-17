@@ -15,18 +15,28 @@ function escapeHtml(s) {
 
 /**
  * Stream often delivers "VPS." + "Praca siedzi" as two chunks with no
- * space. Join them so the next sentence starts on a new paragraph.
+ * space. Keep them in the SAME paragraph — Claude does that.
+ * New paragraph only when the model already sent a blank line,
+ * or the next chunk is a list / heading.
  */
 function appendStreamChunk(prev, chunk) {
   const a = String(prev || "");
   const b = String(chunk || "");
   if (!b) return a;
   if (!a) return b;
-  const aEnd = a.replace(/\s+$/, "");
-  const bStart = b.replace(/^\s+/, "");
+  if (/\n$/.test(a) || /^\n/.test(b)) return a + b;
+
+  const aEnd = a.replace(/[ \t]+$/, "");
+  const bStart = b.replace(/^[ \t]+/, "");
   if (!bStart) return a + b;
-  if (/[.!?…]["”')\]]?$/.test(aEnd) && /^[A-ZĄĆĘŁŃÓŚŹŻ]/.test(bStart)) {
-    return aEnd + "\n\n" + bStart;
+
+  const sentenceEnd = /[.!?…]["”')\]]?$/.test(aEnd);
+  if (sentenceEnd && /^\d+\.\s/.test(bStart)) return aEnd + "\n" + bStart;
+  if (sentenceEnd && /^[-*]\s/.test(bStart)) return aEnd + "\n" + bStart;
+  if (sentenceEnd && /^#{1,4}\s/.test(bStart)) return aEnd + "\n\n" + bStart;
+  if (sentenceEnd && /^[A-ZĄĆĘŁŃÓŚŹŻ]/.test(bStart)) {
+    if (/\s$/.test(a)) return a + bStart;
+    return aEnd + " " + bStart;
   }
   return a + b;
 }
@@ -66,8 +76,9 @@ function normalizeMarkdown(src) {
   // Bold section labels after sentence
   t = t.replace(/([.!?])\s*(\*\*[^*\n]{2,50}\*\*)/g, "$1\n\n$2");
 
-  // Numbered steps "1. Foo 2. Bar"
+  // Numbered steps "1. Foo 2. Bar" and glued "resetować.1. SuperGrok"
   t = t.replace(/(\S)\s+(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
+  t = t.replace(/([^\n\d])(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
 
   t = t.replace(/\n{3,}/g, "\n\n");
   return t.trim();
@@ -137,13 +148,12 @@ function inlineFormat(s) {
 
 /** Split stream-glued sentences. Run AFTER fences are cut out. */
 function unglueSentences(t) {
-  // "siedzi.Jest" — 4+ letters, no space. Skip foo.Bar / i.e.
+  // "siedzi.Jest" / "VPS.Praca" — brak spacji, NIE nowy akapit.
   t = t.replace(
     /([a-ząćęłńóśźż]{4,})\.([A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]{2,})/g,
-    "$1.\n\n$2"
+    "$1. $2"
   );
-  // "VPS.Praca"
-  t = t.replace(/([A-Z]{2,})\.([A-Z][a-ząćęłńóśźż]{2,})/g, "$1.\n\n$2");
+  t = t.replace(/([A-Z]{2,})\.([A-Z][a-ząćęłńóśźż]{2,})/g, "$1. $2");
   // "zmieniłemKolejka" — Polish word glued to a title. Skip openSession.
   t = t.replace(
     /([a-z]*[ąćęłńóśźż][a-ząćęłńóśźż]*)([A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]{3,})/g,

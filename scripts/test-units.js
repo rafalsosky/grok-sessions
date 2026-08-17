@@ -120,30 +120,40 @@ group("markdown: bloki kodu i bezpieczeństwo");
     assert.ok(!out.includes("|---"));
   });
 
-  test("sklejone zdania ze streamu rozbijają się na akapity", () => {
+  test("sklejone zdania zostają w jednym akapicie, jak u Claude", () => {
     const { renderMarkdown, appendStreamChunk } = require("../src/markdown.js");
     const glued = "na VPS.Praca siedzi na boxie.Jest nowszy handover.";
     const out = renderMarkdown(glued);
     const paras = out.match(/<p>/g) || [];
-    assert.ok(paras.length >= 3, "ściana tekstu nie rozbita: " + out);
+    assert.ok(paras.length === 1, "każde zdanie to osobny akapit: " + out);
     assert.ok(out.includes("na VPS."));
     assert.ok(out.includes("Praca siedzi"));
+    assert.ok(out.includes("VPS. Praca") || out.includes("VPS.Praca") === false);
 
     const joined = appendStreamChunk("na VPS.", "Praca siedzi na boxie.");
-    assert.ok(joined.includes("\n\n"), "chunki bez spacji nie dostały akapitu");
-    assert.ok(!joined.includes("VPS.Praca"));
+    assert.strictEqual(joined, "na VPS. Praca siedzi na boxie.");
+    assert.ok(!joined.includes("\n\n"), "zdanie nie może otwierać nowego akapitu");
   });
 
   test("appendStreamChunk nie psuje już poprawnych spacji", () => {
     const { appendStreamChunk } = require("../src/markdown.js");
-    assert.strictEqual(
-      appendStreamChunk("Hello. ", "World"),
-      "Hello.\n\nWorld"
-    );
-    // letter chunks must glue, or "Jasne" becomes "J as ne"
+    assert.strictEqual(appendStreamChunk("Hello. ", "World"), "Hello. World");
+    assert.strictEqual(appendStreamChunk("Hello.\n\n", "World"), "Hello.\n\nWorld");
     assert.strictEqual(appendStreamChunk("J", "as"), "Jas");
     assert.strictEqual(appendStreamChunk("Jas", "ne"), "Jasne");
     assert.strictEqual(appendStreamChunk("abc", "def"), "abcdef");
+  });
+
+  test("numerowana lista nie przykleja się do poprzedniego zdania", () => {
+    const { renderMarkdown, appendStreamChunk } = require("../src/markdown.js");
+    const joined = appendStreamChunk(
+      "Możesz resetować.",
+      "1. SuperGrok → Quit SuperGrok Desktop."
+    );
+    assert.ok(joined.includes("\n1. "), joined);
+    const out = renderMarkdown("Możesz resetować.1. SuperGrok → Quit.");
+    assert.ok(out.includes("<ol"), "lista nie jest listą: " + out);
+    assert.ok(!out.includes("resetować.1."), out);
   });
 
   test("pogrubiony tytuł nie zjada reszty akapitu", () => {
@@ -688,6 +698,27 @@ group("chat-history: dół sesji i merge po transkrypcie");
     assert.strictEqual(out[out.length - 1].text, "Spoko, zrobiłem restart");
   });
 
+  test("przełączenie sesji nie wlewa czatu A do czatu B", () => {
+    const liveB = [
+      { role: "user", text: "zadanie B", _sid: "b" },
+      { role: "assistant", text: "odpowiedź B", _sid: "b" },
+    ];
+    const viewA = [
+      { role: "user", text: "zadanie A", _sid: "a" },
+      { role: "assistant", text: "To nie jest praca w dwóch sesjach", _sid: "a", _streaming: true },
+    ];
+    const out = ch.loadSessionView(liveB, viewA, "b");
+    assert.ok(
+      !out.some((m) => /dwóch sesjach/.test(m.text || "")),
+      "stream A wyciekł do B"
+    );
+    assert.ok(out.some((m) => m.text === "odpowiedź B"));
+    assert.strictEqual(
+      out.filter((m) => m._sid && m._sid !== "b").length,
+      0
+    );
+  });
+
   test("dłuższa historia w widoku wygrywa z krótkim live buforem", () => {
     const live = [{ role: "assistant", text: "stara odpowiedź", tools: [{}] }];
     const current = [
@@ -745,12 +776,16 @@ group("chat-history: dół sesji i merge po transkrypcie");
       "openSession nie scala lokalnych baniek z transkryptem"
     );
     assert.ok(
-      /mergeLiveBufferWithLocals/.test(fn[0]),
-      "live bufor nowej sesji nadpisuje czat bez pierwszej wiadomości"
+      /loadSessionView/.test(fn[0]),
+      "openSession nie ładuje widoku po sid — czat A wejdzie do B"
     );
     assert.ok(
       !/allMessages = \[\];\s*messages = \[\];\s*renderMessages/.test(fn[0]),
       "openSession nadal wipe'uje czat przed await transcript"
+    );
+    assert.ok(
+      /m\._sid === row\.id/.test(fn[0]),
+      "openSession wpuszcza bańki bez _sid z poprzedniej sesji"
     );
   });
 
@@ -773,8 +808,8 @@ group("chat-history: dół sesji i merge po transkrypcie");
       "isViewingSession nie trzyma nowej sesji"
     );
     assert.ok(
-      /!m\._sid \|\| m\._sid === row\.id/.test(app),
-      "openSession odrzuca lokalne bańki bez _sid"
+      /!streamBySession\[sid\]/.test(app),
+      "nowy czat nadal zgłasza się po sid cudzej sesji"
     );
   });
 }
