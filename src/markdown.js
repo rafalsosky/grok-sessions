@@ -173,10 +173,14 @@ function unglueSentences(t) {
     /([a-z]*[ąćęłńóśźż][a-ząćęłńóśźż]*)([A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]{3,})/g,
     "$1\n\n$2"
   );
-  // **Title**GluedNext
+  // **Title**GluedNext.
+  // `[^*]` bez wykluczenia \n parowało ZAMYKAJĄCE ** jednej linii
+  // z OTWIERAJĄCYM ** następnej. Wtedy „2. Na dole jest pole **Dispatch a new
+  // agent**.” dostawało łamacz zaraz po **, a w czacie zostawały gołe gwiazdki.
+  // Otwarcie musi też stać na początku linii albo po spacji/nawiasie.
   t = t.replace(
-    /(\*\*[^*]{2,60}\*\*)([A-ZĄĆĘŁŃÓŚŹŻ])/g,
-    "$1\n\n$2"
+    /(^|[\s(])(\*\*[^*\n]{2,60}\*\*)([A-ZĄĆĘŁŃÓŚŹŻ][a-ząćęłńóśźż]{2,})/g,
+    "$1$2\n\n$3"
   );
   return t;
 }

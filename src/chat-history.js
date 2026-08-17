@@ -1,131 +1,137 @@
 "use strict";
 
-/**
- * Czysta logika historii czatu — bez DOM.
- * Otwarcie długiej sesji zerowało padding i gubiło lokalnie wysłaną bańkę.
- */
+/* Każdy plik idzie do okna zwykłym <script>, więc dzieli JEDEN globalny
+   zakres. Bez tej otoczki `const api` z drugiego pliku wywalał go w całości
+   ("Identifier 'api' has already been declared") i modułu po prostu nie było
+   w oknie — testy w Node przechodziły, bo tam każdy plik ma własny zakres. */
+(function () {
+  /**
+   * Czysta logika historii czatu — bez DOM.
+   * Otwarcie długiej sesji zerowało padding i gubiło lokalnie wysłaną bańkę.
+   */
 
-function contentHeightWithoutPad(scrollHeight, paddingTop) {
-  const h = Number(scrollHeight) || 0;
-  const pad = Number(paddingTop) || 0;
-  return Math.max(0, h - pad);
-}
-
-function nextChatPadding(available, contentH) {
-  const gap = Math.floor((Number(available) || 0) - (Number(contentH) || 0));
-  return gap > 1 ? gap : 0;
-}
-
-function msgText(m) {
-  return String((m && (m.text || m.content)) || "").trim();
-}
-
-function isEmptyAssistant(m) {
-  return (
-    m &&
-    m.role === "assistant" &&
-    !msgText(m) &&
-    !(m.tools && m.tools.length)
-  );
-}
-
-function placeLocalUser(out, m) {
-  const last = out[out.length - 1];
-  const hasUser = out.some((x) => x && x.role === "user");
-  // Missing first prompt of a brand-new turn: only an empty/streaming shell.
-  if (!hasUser && last && last.role === "assistant" && isEmptyAssistant(last)) {
-    out.splice(out.length - 1, 0, m);
-    return;
+  function contentHeightWithoutPad(scrollHeight, paddingTop) {
+    const h = Number(scrollHeight) || 0;
+    const pad = Number(paddingTop) || 0;
+    return Math.max(0, h - pad);
   }
-  if (!hasUser && last && last.role === "assistant" && last._streaming && !last.tools?.length) {
-    out.splice(out.length - 1, 0, m);
-    return;
-  }
-  // Follow-up: always after the last reply, never at the top of history.
-  out.push(m);
-}
 
-function mergeTranscriptWithLocals(mapped, current) {
-  const base = Array.isArray(mapped) ? mapped.slice() : [];
-  const extras = (current || []).filter((m) => m && (m._local || m._streaming));
-  if (!extras.length) return base;
-  const seen = new Set(base.map(msgText).filter(Boolean));
-  const out = base.slice();
-  for (const m of extras) {
-    const t = msgText(m);
-    if (m._streaming || !t || !seen.has(t)) {
-      if (m.role === "user" && m._local) placeLocalUser(out, m);
-      else out.push(m);
-      if (t) seen.add(t);
-    }
+  function nextChatPadding(available, contentH) {
+    const gap = Math.floor((Number(available) || 0) - (Number(contentH) || 0));
+    return gap > 1 ? gap : 0;
   }
-  return out;
-}
 
-/**
- * Live buffer of a brand-new session often has only the assistant.
- * If the open view already has a longer history, keep it — a short
- * live snapshot must not throw away earlier turns.
- */
-function mergeLiveBufferWithLocals(liveMsgs, current, sid) {
-  const live = Array.isArray(liveMsgs) ? liveMsgs : [];
-  const curr = Array.isArray(current) ? current : [];
-  const extras = curr.filter((m) => {
-    if (!m || !(m._local || m._streaming)) return false;
-    if (m._sid && sid && m._sid !== sid) return false;
-    return true;
-  });
-  const liveStable = live.filter((m) => m && !m._streaming).length;
-  const currStable = curr.filter((m) => m && !m._streaming).length;
-  if (currStable > liveStable) {
-    const merged = mergeTranscriptWithLocals(curr, extras);
-    const liveStream = live.find(
-      (m) => m && m.role === "assistant" && m._streaming && msgText(m)
+  function msgText(m) {
+    return String((m && (m.text || m.content)) || "").trim();
+  }
+
+  function isEmptyAssistant(m) {
+    return (
+      m &&
+      m.role === "assistant" &&
+      !msgText(m) &&
+      !(m.tools && m.tools.length)
     );
-    if (liveStream) {
-      const idx = merged.findIndex(
-        (m) => m && m.role === "assistant" && m._streaming
-      );
-      if (idx >= 0) merged[idx] = liveStream;
-      else merged.push(liveStream);
-    }
-    return merged;
   }
-  return mergeTranscriptWithLocals(live, extras);
-}
 
-function isOrphanLocalForSession(m, sid) {
-  if (!m || !(m._local || m._streaming)) return false;
-  return !m._sid || m._sid === sid;
-}
+  function placeLocalUser(out, m) {
+    const last = out[out.length - 1];
+    const hasUser = out.some((x) => x && x.role === "user");
+    // Missing first prompt of a brand-new turn: only an empty/streaming shell.
+    if (!hasUser && last && last.role === "assistant" && isEmptyAssistant(last)) {
+      out.splice(out.length - 1, 0, m);
+      return;
+    }
+    if (!hasUser && last && last.role === "assistant" && last._streaming && !last.tools?.length) {
+      out.splice(out.length - 1, 0, m);
+      return;
+    }
+    // Follow-up: always after the last reply, never at the top of history.
+    out.push(m);
+  }
 
-/**
- * Widok jednej sesji. Cudzy czat (dłuższy, bez _sid, inny _sid) nie wchodzi.
- * Przy przełączaniu A→B dawny merge brał dłuższą historię A i pokazywał
- * ją jako B — stąd ta sama odpowiedź w obu kartach.
- */
-function loadSessionView(liveMsgs, current, sid) {
-  const live = Array.isArray(liveMsgs) ? liveMsgs.slice() : [];
-  const extras = (current || []).filter((m) => {
+  function mergeTranscriptWithLocals(mapped, current) {
+    const base = Array.isArray(mapped) ? mapped.slice() : [];
+    const extras = (current || []).filter((m) => m && (m._local || m._streaming));
+    if (!extras.length) return base;
+    const seen = new Set(base.map(msgText).filter(Boolean));
+    const out = base.slice();
+    for (const m of extras) {
+      const t = msgText(m);
+      if (m._streaming || !t || !seen.has(t)) {
+        if (m.role === "user" && m._local) placeLocalUser(out, m);
+        else out.push(m);
+        if (t) seen.add(t);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Live buffer of a brand-new session often has only the assistant.
+   * If the open view already has a longer history, keep it — a short
+   * live snapshot must not throw away earlier turns.
+   */
+  function mergeLiveBufferWithLocals(liveMsgs, current, sid) {
+    const live = Array.isArray(liveMsgs) ? liveMsgs : [];
+    const curr = Array.isArray(current) ? current : [];
+    const extras = curr.filter((m) => {
+      if (!m || !(m._local || m._streaming)) return false;
+      if (m._sid && sid && m._sid !== sid) return false;
+      return true;
+    });
+    const liveStable = live.filter((m) => m && !m._streaming).length;
+    const currStable = curr.filter((m) => m && !m._streaming).length;
+    if (currStable > liveStable) {
+      const merged = mergeTranscriptWithLocals(curr, extras);
+      const liveStream = live.find(
+        (m) => m && m.role === "assistant" && m._streaming && msgText(m)
+      );
+      if (liveStream) {
+        const idx = merged.findIndex(
+          (m) => m && m.role === "assistant" && m._streaming
+        );
+        if (idx >= 0) merged[idx] = liveStream;
+        else merged.push(liveStream);
+      }
+      return merged;
+    }
+    return mergeTranscriptWithLocals(live, extras);
+  }
+
+  function isOrphanLocalForSession(m, sid) {
     if (!m || !(m._local || m._streaming)) return false;
-    return Boolean(sid && m._sid === sid);
-  });
-  if (!live.length) return extras.slice();
-  return mergeTranscriptWithLocals(live, extras);
-}
+    return !m._sid || m._sid === sid;
+  }
 
-const api = {
-  contentHeightWithoutPad,
-  nextChatPadding,
-  mergeTranscriptWithLocals,
-  mergeLiveBufferWithLocals,
-  loadSessionView,
-  isOrphanLocalForSession,
-};
+  /**
+   * Widok jednej sesji. Cudzy czat (dłuższy, bez _sid, inny _sid) nie wchodzi.
+   * Przy przełączaniu A→B dawny merge brał dłuższą historię A i pokazywał
+   * ją jako B — stąd ta sama odpowiedź w obu kartach.
+   */
+  function loadSessionView(liveMsgs, current, sid) {
+    const live = Array.isArray(liveMsgs) ? liveMsgs.slice() : [];
+    const extras = (current || []).filter((m) => {
+      if (!m || !(m._local || m._streaming)) return false;
+      return Boolean(sid && m._sid === sid);
+    });
+    if (!live.length) return extras.slice();
+    return mergeTranscriptWithLocals(live, extras);
+  }
 
-if (typeof module !== "undefined" && module.exports) {
-  module.exports = api;
-}
-if (typeof window !== "undefined") {
-  window.chatHistory = api;
-}
+  const api = {
+    contentHeightWithoutPad,
+    nextChatPadding,
+    mergeTranscriptWithLocals,
+    mergeLiveBufferWithLocals,
+    loadSessionView,
+    isOrphanLocalForSession,
+  };
+
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = api;
+  }
+  if (typeof window !== "undefined") {
+    window.chatHistory = api;
+  }
+})();

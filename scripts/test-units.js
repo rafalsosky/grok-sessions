@@ -1137,6 +1137,19 @@ group("markdown: struktura jak w źródle, nie sitko akapitów");
     assert.strictEqual((out.match(/<li>/g) || []).length, 2, out);
     assert.ok(!/<p>/.test(out), "ciąg dalszy punktu wypadł z listy: " + out);
   });
+  test("pogrubienie w punkcie listy nie rozpada sie na gole gwiazdki", () => {
+    const src =
+      "1. Wcisnij **`Ctrl+\\`** (albo wpisz `/dashboard`).\n" +
+      "2. Na dole jest pole **Dispatch a new agent**.\n" +
+      "3. Wpisz pierwsze zadanie i **`Enter`** — nowa sesja startuje.";
+    const out = renderMarkdown(src);
+    assert.ok(!/\*\*/.test(out), "gole ** w czacie: " + out);
+    assert.strictEqual((out.match(/<li>/g) || []).length, 3, out);
+    assert.ok(
+      out.includes("<strong>Dispatch a new agent</strong>"),
+      "pogrubienie rozerwane miedzy liniami: " + out
+    );
+  });
   test("numerowany nagłówek zostaje nagłówkiem, nie listą po „###”", () => {
     const out = renderMarkdown("### 1. Jedna sesja, nie dwie");
     assert.ok(/md-h/.test(out), "nagłówek rozbity na listę: " + out);
@@ -1146,6 +1159,51 @@ group("markdown: struktura jak w źródle, nie sitko akapitów");
     const out = renderMarkdown("a  \n<img src=x onerror=alert(1)>");
     assert.ok(!out.includes("<img"), out);
     assert.ok(out.includes("<br>"), out);
+  });
+}
+
+/* ── 7e. Skrypty renderera dziela JEDEN globalny zakres ────────────────
+   17.08: work-summary.js, chat-history.js i chat-scroll.js deklarowaly
+   `const api`. Przegladarka laduje je zwyklymi <script> do wspolnego
+   zakresu, wiec drugi i trzeci plik lecial w calosci na
+   "Identifier 'api' has already been declared" i window.chatScroll /
+   window.chatHistory NIE ISTNIALY. app.js cicho schodzil na zaslepki
+   (scroller zawsze ciagnal na dol, loadSessionView nie dzialal).
+   Node tego nie lapal, bo tam kazdy plik ma wlasny zakres modulu. */
+group("renderer: pliki nie kasuja sie nawzajem we wspolnym zakresie");
+{
+  const vm = require("vm");
+  const html = fs.readFileSync(path.join(ROOT, "src", "index.html"), "utf8");
+  const files = [...html.matchAll(/<script src="\.\/([\w.-]+\.js)"><\/script>/g)].map(
+    (m) => m[1]
+  );
+  test("index.html faktycznie laduje moduly UI", () => {
+    assert.ok(files.length >= 5, "za malo skryptow w index.html: " + files);
+    for (const need of ["chat-scroll.js", "chat-history.js", "work-summary.js"]) {
+      assert.ok(files.includes(need), "brak " + need);
+    }
+  });
+  test("sklejone skrypty kompiluja sie jak w oknie (zero kolizji const)", () => {
+    const src = files
+      .map((f) => fs.readFileSync(path.join(ROOT, "src", f), "utf8"))
+      .join("\n;\n");
+    assert.doesNotThrow(
+      () => new vm.Script(src, { filename: "renderer-bundle.js" }),
+      "kolizja nazw miedzy plikami — w oknie ktorys modul sie nie zaladuje"
+    );
+  });
+  test("moduly wystawiaja sie na window pod wlasna nazwa", () => {
+    for (const [f, name] of [
+      ["chat-scroll.js", "chatScroll"],
+      ["chat-history.js", "chatHistory"],
+      ["work-summary.js", "workSummary"],
+    ]) {
+      const src = fs.readFileSync(path.join(ROOT, "src", f), "utf8");
+      assert.ok(
+        new RegExp("window\\." + name + "\\s*=").test(src),
+        f + " nie ustawia window." + name
+      );
+    }
   });
 }
 
