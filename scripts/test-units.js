@@ -1208,6 +1208,30 @@ group("markdown: struktura jak w źródle, nie sitko akapitów");
       "pogrubienie rozerwane miedzy liniami: " + out
     );
   });
+  test("bloki kodu nie sa przerabiane przez odzyskiwanie struktury", () => {
+    const out = renderMarkdown("```js\nif (a || b) run();\nconst x = a - b;\n```");
+    assert.ok(out.includes("if (a || b) run();"), "reguła || rozbila kod: " + out);
+    assert.ok(out.includes("const x = a - b;"), "reguła list rozbila kod: " + out);
+  });
+  test("kropka przed naglowkiem nie znika", () => {
+    const out = renderMarkdown("Gotowe. Wszystko dziala.\n\n## Nastepny krok");
+    assert.ok(out.includes("Wszystko dziala."), "zjedzona kropka: " + out);
+    assert.ok(/md-h/.test(out), "naglowek zgubiony");
+  });
+  test("komorka tabeli z pogrubionym numerem nie rozbija wiersza", () => {
+    const out = renderMarkdown("| Opcja | Gdzie |\n|---|---|\n| **1. Lepszy TUI** | Ghostty |");
+    assert.ok(!/\*\*/.test(out), "gole ** w tabeli: " + out);
+    assert.strictEqual((out.match(/<tr>/g) || []).length, 2, "wiersz rozbity: " + out);
+  });
+  test("lista numerowana startuje od numeru ze zrodla", () => {
+    const out = renderMarkdown("5. Czekaj na prompt\n6. Potem klikaj");
+    assert.ok(/start="5"/.test(out), "numeracja zresetowana do 1: " + out);
+  });
+  test("pogrubienie w wcietej kontynuacji nie wyrzuca punktu z listy", () => {
+    const out = renderMarkdown("1. **MCP auth**\n   Dziala: Arc.\n   **Nie**: Meta Ads.\n2. Drugi");
+    assert.strictEqual((out.match(/<ol/g) || []).length, 1, "lista rozbita: " + out);
+    assert.strictEqual((out.match(/<li>/g) || []).length, 2, out);
+  });
   test("numerowany nagłówek zostaje nagłówkiem, nie listą po „###”", () => {
     const out = renderMarkdown("### 1. Jedna sesja, nie dwie");
     assert.ok(/md-h/.test(out), "nagłówek rozbity na listę: " + out);

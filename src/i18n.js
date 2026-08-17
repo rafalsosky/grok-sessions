@@ -108,6 +108,8 @@ const PL = {
   "running now": "w toku",
   "Queued — will send after this batch":
     "W kolejce — wyślę po tej paczce narzędzi",
+  "Queued message stayed in its own session":
+    "Wiadomość z kolejki została w swojej sesji",
   "In progress": "W toku",
   Completed: "Ukończone",
   Show: "Pokaż",

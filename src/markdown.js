@@ -48,7 +48,9 @@ function normalizeMarkdown(src) {
   let t = String(src || "").replace(/\r\n/g, "\n");
 
   // Heading glued after text: "…id .## Title" or "…id## Title"
-  t = t.replace(/([^\n#])\s*\.?(\s*)(#{1,4})\s+/g, "$1\n\n$3 ");
+  // Kropka musi WROCIC do tekstu. `\.?` bylo dopasowywane i nieoddawane,
+  // wiec „Gotowe. Dziala.” przed naglowkiem gubilo kropke (168 razy w korpusie).
+  t = t.replace(/([^\n#])\s*(\.?)(\s*)(#{1,4})\s+/g, "$1$2\n\n$4 ");
   // Heading then immediate table on same line: "## Title| A | B |"
   t = t.replace(/^(#{1,4}\s+[^|\n]+)\|/gm, "$1\n\n|");
 
@@ -78,13 +80,17 @@ function normalizeMarkdown(src) {
   // (jest już po nowej linii). Wcześniej każde pogrubienie w środku zdania
   // wylatywało do osobnego bloku i robiło się z niego nagłówek — stąd
   // „pogrubiony tekst nie wiadomo skąd” i dziury między zdaniami.
-  t = t.replace(/([.!?])[ \t]*\n[ \t]*(\*\*[^*\n]{2,50}\*\*)/g, "$1\n\n$2");
+  // Bez `[ \t]*` po \n: wciecie znaczy „ciag dalszy punktu listy”. Zdjecie go
+  // wyrzucalo punkt z listy i restartowalo numeracje od 1.
+  t = t.replace(/([.!?])[ \t]*\n(\*\*[^*\n]{2,50}\*\*)/g, "$1\n\n$2");
 
   // Numbered steps "1. Foo 2. Bar" and glued "resetować.1. SuperGrok".
   // Nie odrywaj numeru od znacznika nagłówka: „### 1. Jedna sesja” zostawiało
   // samotne „###” jako tekst w czacie.
-  t = t.replace(/([^\s#])\s+(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
-  t = t.replace(/(?<!#)([^\n\d])(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
+  // `(?<!\|[^\n]*)` = nie w wierszu tabeli. Komorka `| **1. Lepszy TUI** |`
+  // rozbijala sie na dwa wiersze, jeden z golym `**`.
+  t = t.replace(/(?<!\|[^\n]*)([^\s#])\s+(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
+  t = t.replace(/(?<!\|[^\n]*)(?<!#)([^\n\d])(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
 
   t = t.replace(/\n{3,}/g, "\n\n");
   return t.trim();
@@ -187,7 +193,11 @@ function unglueSentences(t) {
 
 function renderMarkdown(src) {
   if (!src) return "";
-  let text = normalizeMarkdown(src);
+  // KOLEJNOŚĆ JEST NOŚNA: najpierw wycinamy bloki kodu, dopiero potem
+  // odzyskujemy strukturę. Odwrotnie reguły normalizeMarkdown jechały po
+  // kodzie — `if (a || b)` pękało na `||`, `const x = a - b;` na regule list,
+  // a wyrównanie w blokach bash znikało.
+  let text = String(src).replace(/\r\n/g, "\n");
 
   // Niedomknięty fence w trakcie streamu: domknij, żeby kod nie wyciekał
   // do tekstu jako ściana backticków.
@@ -210,6 +220,7 @@ function renderMarkdown(src) {
     return `\n\n\u0000BLOCK${i}\u0000\n\n`;
   });
 
+  text = normalizeMarkdown(text);
   text = unglueSentences(text);
 
   // Split into blocks by blank lines, but keep table/list clusters
@@ -308,9 +319,12 @@ function renderMarkdown(src) {
     }
 
     if (/^\d+\.\s+/.test(trimmed)) {
+      // Krok 5 ma się pokazać jako 5, nie jako 1. Blok kodu w środku listy
+      // rozbija ją na dwa <ol> i numeracja startowała od nowa.
+      const start = parseInt(trimmed, 10);
       const items = collectList(/^\d+\.\s+/);
       out.push(
-        "<ol class=\"md-ol\">" +
+        `<ol class="md-ol"${start > 1 ? ` start="${start}"` : ""}>` +
           items.map((it) => `<li>${inlineFormatKeepBr(it)}</li>`).join("") +
           "</ol>"
       );

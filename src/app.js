@@ -748,6 +748,13 @@
       };
   let stickToBottom = true;
   let scrollingProgrammatically = false;
+  /**
+   * Ostatni scrollTop, który ustawiliśmy SAMI. Przeciąganie suwaka myszą
+   * generuje wyłącznie zdarzenie `scroll` (bez wheel/touch/keydown), a flaga
+   * „to my scrollujemy” jest w trakcie streamu podniesiona prawie bez przerwy
+   * przez ResizeObserver — gest był zjadany i widok wracał na dół.
+   */
+  let autoTop = -1;
   let scrollBottomTimer = 0;
 
   function syncStickFlag() {
@@ -792,6 +799,7 @@
         const max = Math.max(0, b.scrollHeight - b.clientHeight);
         b.scrollTop = max > 0 ? max : b.scrollHeight;
       });
+      autoTop = b.scrollTop;
       scrollingProgrammatically = false;
     };
     go();
@@ -834,6 +842,7 @@
         layoutChatBottom();
         scrollingProgrammatically = true;
         scroller.applyBottom(box);
+        autoTop = box.scrollTop;
         scrollingProgrammatically = false;
       }
       if (++ticks > 20 || stable >= 3) {
@@ -850,7 +859,10 @@
     box.addEventListener(
       "scroll",
       () => {
-        if (scrollingProgrammatically || scroller.isProgrammatic?.()) return;
+        const nasze =
+          (scrollingProgrammatically || scroller.isProgrammatic?.()) &&
+          Math.abs(box.scrollTop - autoTop) <= 2;
+        if (nasze) return;
         scroller.onUserScroll(box);
         syncStickFlag();
       },
@@ -899,6 +911,7 @@
         if (scroller.shouldFollow()) {
           scrollingProgrammatically = true;
           scroller.applyBottom(el.chatScroll);
+          autoTop = el.chatScroll.scrollTop;
           requestAnimationFrame(() => {
             scrollingProgrammatically = false;
           });
@@ -1547,6 +1560,10 @@
   /** Zapisz live stan Build sesji przed przełączeniem. */
   function snapshotCurrentBuildSession() {
     if (mode !== "grok" || !liveSessionId) return;
+    // openSession ustawia liveSessionId OD RAZU, ale czeka na transkrypt.
+    // W tym oknie allMessages należy jeszcze do poprzedniej sesji — zrzut
+    // zapisałby czat A pod kluczem B.
+    if (loadingSid && loadingSid === liveSessionId) return;
     const sid = liveSessionId;
     streamBySession[sid] = {
       allMessages: allMessages.slice(),
@@ -1576,6 +1593,8 @@
    */
   let viewEpoch = 0;
   let pendingNewEpoch = -1;
+  /** Sesja, której transkrypt właśnie się wczytuje (widok jeszcze nie jej). */
+  let loadingSid = null;
 
   function bumpViewEpoch() {
     viewEpoch++;
@@ -1755,11 +1774,17 @@
     visibleCount = PAGE;
     renderActivity();
 
-    const tr = await api.transcript({
-      id: row.id,
-      dirPath: row.dirPath,
-      mode: mode === "home" ? "home" : "grok",
-    });
+    loadingSid = row.id;
+    let tr;
+    try {
+      tr = await api.transcript({
+        id: row.id,
+        dirPath: row.dirPath,
+        mode: mode === "home" ? "home" : "grok",
+      });
+    } finally {
+      if (loadingSid === row.id) loadingSid = null;
+    }
     // race: user could have switched again
     if (selectedId !== row.id) return;
 
@@ -2047,7 +2072,9 @@
       }
       const n = normUserText(m.text);
       if (!n) continue;
-      if (lastUserNorm && (n === lastUserNorm || n.startsWith(lastUserNorm) || lastUserNorm.startsWith(n))) {
+      // TYLKO równość. Dopasowanie prefiksowe kasowało „popraw to”, gdy zaraz
+      // po nim szło „popraw to jeszcze raz” — dwie świadome prośby usera.
+      if (lastUserNorm && n === lastUserNorm) {
         // starszy duplikat (idziemy od końca — zostaw najnowszy, skasuj wcześniejszy przy drugim trafieniu)
         // przy skanie od końca: first hit = keep, second same = remove this older one
         removeIds.add(m.id);
@@ -2058,16 +2085,13 @@
     if (!removeIds.size) return;
     allMessages = allMessages.filter((m) => !removeIds.has(m.id));
     syncVisibleMessages();
-    // DOM: usuń user rows z tym samym tekstem (zostaw pierwszą od góry / ostatnią w DOM)
-    const userRows = [...el.messages.querySelectorAll(".msg.user")];
-    const seen = new Set();
-    // idź od końca — zostaw ostatnią, usuń wcześniejsze z tym samym norm tekstem
-    for (let i = userRows.length - 1; i >= 0; i--) {
-      const row = userRows[i];
-      const txt = normUserText(row.querySelector(".msg-content")?.textContent || "");
-      if (!txt) continue;
-      if (seen.has(txt)) row.remove();
-      else seen.add(txt);
+    // DOM: kasuj DOKŁADNIE to, co wypadło z modelu. Skan po tekście leciał po
+    // CAŁEJ historii i usuwał z widoku starsze „ok”, które w modelu zostawało —
+    // wiadomość znikała z ekranu, choć agent ją pamiętał.
+    for (const id of removeIds) {
+      el.messages
+        .querySelector(`.msg.user[data-msg-id="${cssAttr(id)}"]`)
+        ?.remove();
     }
     bag().allMessages = allMessages;
   }
@@ -2718,7 +2742,16 @@
     const atts = attachments.slice();
 
     // Agent busy → osobna pozycja w kolejce (nie sklejaj z poprzednią).
-    if (isSessionBusy(liveSessionId || selectedId) || (mode === "home" && busy)) {
+    // Trzeci warunek: świeży czat Build już startuje, ale nie zna jeszcze sid.
+    // Bez tego drugi Enter przed poznaniem sid zakładał KOLEJNĄ sesję i drugi
+    // proces agenta — dwie karty z jednego pytania.
+    const nowaWStarcie =
+      mode === "grok" && !liveSessionId && !selectedId && busy;
+    if (
+      isSessionBusy(liveSessionId || selectedId) ||
+      (mode === "home" && busy) ||
+      nowaWStarcie
+    ) {
       const piece = text || tr("(attachment)");
       const qid = `u-q-${Date.now()}-${messageQueue.length}`;
       messageQueue.push({ id: qid, text: piece, attachments: atts });
@@ -2879,20 +2912,32 @@
     const atts = (msg && msg.attachments) || [];
     if (!text && !atts.length) return;
 
+    // Sid MOJEJ sesji, zdjęty PRZED await. chatStop czeka na śmierć procesu
+    // (SIGTERM, potem SIGKILL po 3 s) — w tym oknie da się kliknąć inną kartę.
+    // Wcześniej po awaicie funkcja czytała liveSessionId jeszcze raz i wysyłała
+    // wiadomość napisaną w A do agenta sesji B, w cudzym katalogu roboczym.
+    const sid = liveSessionId || selectedId;
     const keepId = msg.id;
     messageQueue = messageQueue.filter((q) => q.id !== keepId);
     updateQueueChip();
 
     try {
-      await withTimeout(
-        api.chatStop({ mode, sessionId: liveSessionId || selectedId }),
-        4000
-      );
+      await withTimeout(api.chatStop({ mode, sessionId: sid }), 4000);
     } catch {
       /* stop hung — send anyway */
     }
+    if ((liveSessionId || selectedId) !== sid) {
+      // Widok już nie należy do tej sesji — wróć pozycję do JEJ kolejki.
+      const buf = ensureSessionStream(sid);
+      if (buf) {
+        buf.messageQueue = buf.messageQueue || [];
+        buf.messageQueue.unshift(msg);
+      }
+      showToast(tr("Queued message stayed in its own session"), "ok");
+      return;
+    }
     setBusy(false);
-    setSessionBusy(liveSessionId || selectedId, false);
+    setSessionBusy(sid, false);
     closeStreamingAssistant();
 
     const payload =
