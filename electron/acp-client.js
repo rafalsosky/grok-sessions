@@ -67,6 +67,16 @@ class AcpClient extends EventEmitter {
       env: process.env,
     });
 
+    // Bez tego handlera blad spawnu (brak binarki, brak praw) leci jako
+    // nieobsluzony 'error' na EventEmitterze i ubija CALY proces glowny
+    // Electrona — apka znikala z ekranu zamiast pokazac komunikat.
+    this.proc.on("error", (err) => {
+      this.ready = false;
+      for (const [, p] of this.pending) p.reject(err);
+      this.pending.clear();
+      this.emit("error", err);
+    });
+
     this.rl = readline.createInterface({ input: this.proc.stdout });
     this.rl.on("line", (line) => this._onLine(line));
     this.proc.stderr.on("data", (buf) => {

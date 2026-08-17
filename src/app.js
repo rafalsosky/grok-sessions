@@ -3128,6 +3128,15 @@
           buf.statusDetail = res.ok ? "" : String(res.error || "").slice(0, 120);
         }
       }
+      // Home ma jeden tor i odpowiedź przychodzi CAŁA w res.assistant. Jeśli
+      // user przełączył zakładkę na Build w trakcie tury, ta gałąź wychodziła
+      // bez wpisania treści — po powrocie stała pusta bańka, a pierwsze
+      // persistHomeView zapisywało tę pustkę na dysk i kasowało odpowiedź.
+      if (turnMode === "home" && res.ok && res.assistant && turnAssistant) {
+        turnAssistant.text = res.assistant.content || "";
+        turnAssistant.images = res.assistant.images || [];
+        turnAssistant.videos = res.assistant.videos || [];
+      }
       // Flaga busy trybu — zdejmij tylko wtedy, gdy NIC już nie pracuje.
       // Inaczej koniec tury A gasiłby wskaźnik pracy sesji B.
       if (turnMode === "home") setBusy(false, "home");
