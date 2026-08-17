@@ -1605,6 +1605,15 @@
    */
   let viewEpoch = 0;
   let pendingNewEpoch = -1;
+  /**
+   * Token tury, ktora wlasnie zaklada nowa sesje. main.js odsyla go razem
+   * z prawdziwym sid (chat:session-started), wiec wiadomo DOKLADNIE, do
+   * ktorego nowego czatu nalezy sesja. Sama epoka nie wystarczala: przy
+   * dwoch nowych czatach naraz spoznione sid z A pasowalo do bramki B
+   * i pytanie z B ladowalo w czacie A.
+   */
+  let turnSeq = 0;
+  let pendingNewToken = null;
   /** Sesja, której transkrypt właśnie się wczytuje (widok jeszcze nie jej). */
   let loadingSid = null;
 
@@ -1659,11 +1668,14 @@
   }
 
   /** New chat gets a real session id mid-turn — stay on this view. */
-  function adoptBuildSession(sid) {
+  function adoptBuildSession(sid, opts = {}) {
     if (!sid || mode !== "grok") return;
     if (cur.selectedId === sid || cur.liveSessionId === sid) {
         return;
     }
+    // Adopcja idzie WYLACZNIE z chat:session-started (token tury). Stream
+    // nie niesie informacji, do ktorego nowego czatu nalezy jego sid.
+    if (!opts.zTokenu) return;
     if (!awaitingOwnNewSession()) return;
     if (cur.selectedId && cur.selectedId !== sid) return;
     if (streamBySession[sid] && cur.liveSessionId !== sid) return;
@@ -1682,7 +1694,9 @@
     if (mode !== "grok") return false;
     if (cur.selectedId === sid || cur.liveSessionId === sid) return true;
     // Nowy czat: bierzemy tylko sid, którego jeszcze nie ma inna karta
-    if (awaitingOwnNewSession() && !cur.selectedId && !streamBySession[sid]) return true;
+    // Nowy czat NIE zglasza sie po nieznany sid — dopoki nie dostanie swojego
+    // z tokenu tury, stream obcej sesji ma isc do jej wlasnego rekordu.
+    return false;
     return false;
   }
 
@@ -1839,17 +1853,13 @@
     );
     const merge =
       chatHistory.mergeTranscriptWithLocals || ((a, b) => a.concat(b || []));
-    const extras = cur.allMessages.filter(
-      (m) => m && (m._local || m._streaming) && m._sid === row.id
-    );
-    const fromBuf = ((streamBySession[row.id] &&
-      streamBySession[row.id].allMessages) ||
-      []).filter((m) => m && (m._local || m._streaming) && m._sid === row.id);
-    cur.allMessages = merge(cleaned, extras.concat(fromBuf));
-    for (const m of cur.allMessages) {
-      if (!m._sid) m._sid = row.id;
-    }
-    holdStick(1200);
+    // Po przebudowie `cur` i `streamBySession[row.id]` to TEN SAM rekord, wiec
+    // dawne `extras` i `fromBuf` bralo dwa razy z jednego zrodla (przed dedupem
+    // po tresci dawaloby to podwojne banki). Zywe banki leza juz w rekordzie
+    // tej sesji z definicji, wiec nie ma czego odsiewac po znaczniku sesji.
+    const zywe = cur.allMessages.filter((m) => m && (m._local || m._streaming));
+    cur.allMessages = merge(cleaned, zywe);
+    holdStick();
     syncVisibleMessages();
     renderMessages({ forceScroll: true });
     // Wznowiona sesja: markdown i obrazy dorastają jeszcze przez chwilę po
@@ -2969,7 +2979,11 @@
     const sessionId = cur.liveSessionId || cur.selectedId || null;
     const turnMode = mode;
     pendingNewSession = mode === "grok" && !sessionId;
-    if (pendingNewSession) pendingNewEpoch = viewEpoch;
+    const turnToken = `t${++turnSeq}`;
+    if (pendingNewSession) {
+      pendingNewEpoch = viewEpoch;
+      pendingNewToken = turnToken;
+    }
     const displayText = cleanUserText(text); // bez markerów / „Wstrzyknieto…”
 
     // Znajdź bańkę z kolejki do reuse (nie klonuj po wysłaniu)
@@ -3034,7 +3048,6 @@
           tools: [],
           attachments: atts || [],
           _local: true,
-          _sid: cur.selectedId || cur.liveSessionId || null,
           _ts: Date.now(),
         };
         pushAll(userMsg);
@@ -3049,7 +3062,6 @@
       tools: [],
       thinking: "",
       _streaming: true,
-      _sid: cur.selectedId || cur.liveSessionId || null,
     };
     // Bańka TEJ tury. Po await user może już oglądać inną sesję i moduł
     // `streamingAssistant` będzie wtedy wskazywał na cudzy stream.
@@ -3065,7 +3077,7 @@
     autosize();
     // Enter: NIE wipe'uj DOM (replaceChildren = scrollTop→0 = skok w górę).
     // Tylko doklej nowe bańki na koniec + force scroll na dół.
-    holdStick(1500);
+    holdStick();
     stickToBottom = true;
     // BEZ allMessages.length: syncVisibleMessages i tak tnie OGON, wiec swieze
     // banki zawsze sa w widoku, a paginacja przestawala dzialac po pierwszej
@@ -3095,6 +3107,7 @@
 
     const res = await api.chatSend({
       text: text === tr("(attachment)") ? "" : text,
+      turnToken,
       sessionId,
       cwd,
       mode,
@@ -3165,7 +3178,12 @@
       rememberLocalTitle(res.sessionId);
       // Jeden ruch zamiast dwoch przypisan: rekord dostaje prawdziwy klucz,
       // a selectedId i liveSessionId nie maja jak sie rozjechac.
-      if (cur.sid !== res.sessionId) rekeyNewSession(mode, res.sessionId);
+      // Tylko gdy to NADAL ta sama tura — inaczej przemianowalibysmy rekord
+      // czatu, ktory user zdazyl w miedzyczasie zalozyc.
+      if (cur.sid !== res.sessionId && pendingNewToken === turnToken) {
+        rekeyNewSession(mode, res.sessionId);
+        pendingNewToken = null;
+      }
     }
     if (turnAssistant) turnAssistant._streaming = false;
 
@@ -3804,6 +3822,18 @@
         }
       }
       renderList();
+    });
+  }
+
+  // Nowa sesja Build poznala sid. Token mowi, KTORA tura ja zalozyla, wiec
+  // rekord "grok:new" tej tury dostaje prawdziwy klucz — bez zgadywania.
+  if (typeof api.onChatSessionStarted === "function") {
+    api.onChatSessionStarted(({ sessionId, turnToken }) => {
+      if (!sessionId || !turnToken) return;
+      if (turnToken !== pendingNewToken) return;
+      pendingNewToken = null;
+      rememberLocalTitle(sessionId);
+      adoptBuildSession(sessionId, { zTokenu: true });
     });
   }
 

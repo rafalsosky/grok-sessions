@@ -61,6 +61,12 @@ contextBridge.exposeInMainWorld("grokSessions", {
     return () => ipcRenderer.removeListener("chat:status", handler);
   },
   /** Proces agenta padl (crash / brak binarki). Bez tego kanal szedl w prozne. */
+  /** Nowa sesja Build dostala sid — z tokenem tury, ktora ja utworzyla. */
+  onChatSessionStarted: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on("chat:session-started", handler);
+    return () => ipcRenderer.removeListener("chat:session-started", handler);
+  },
   onChatAgentExit: (cb) => {
     const handler = (_e, data) => cb(data);
     ipcRenderer.on("chat:agent-exit", handler);

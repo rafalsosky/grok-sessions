@@ -77,42 +77,7 @@
     return out;
   }
 
-  /**
-   * Live buffer of a brand-new session often has only the assistant.
-   * If the open view already has a longer history, keep it — a short
-   * live snapshot must not throw away earlier turns.
-   */
-  function mergeLiveBufferWithLocals(liveMsgs, current, sid) {
-    const live = Array.isArray(liveMsgs) ? liveMsgs : [];
-    const curr = Array.isArray(current) ? current : [];
-    const extras = curr.filter((m) => {
-      if (!m || !(m._local || m._streaming)) return false;
-      if (m._sid && sid && m._sid !== sid) return false;
-      return true;
-    });
-    const liveStable = live.filter((m) => m && !m._streaming).length;
-    const currStable = curr.filter((m) => m && !m._streaming).length;
-    if (currStable > liveStable) {
-      const merged = mergeTranscriptWithLocals(curr, extras);
-      const liveStream = live.find(
-        (m) => m && m.role === "assistant" && m._streaming && msgText(m)
-      );
-      if (liveStream) {
-        const idx = merged.findIndex(
-          (m) => m && m.role === "assistant" && m._streaming
-        );
-        if (idx >= 0) merged[idx] = liveStream;
-        else merged.push(liveStream);
-      }
-      return merged;
-    }
-    return mergeTranscriptWithLocals(live, extras);
-  }
 
-  function isOrphanLocalForSession(m, sid) {
-    if (!m || !(m._local || m._streaming)) return false;
-    return !m._sid || m._sid === sid;
-  }
 
   /**
    * Widok jednej sesji. Cudzy czat (dłuższy, bez _sid, inny _sid) nie wchodzi.
@@ -121,10 +86,11 @@
    */
   function loadSessionView(liveMsgs, current, sid) {
     const live = Array.isArray(liveMsgs) ? liveMsgs.slice() : [];
-    const extras = (current || []).filter((m) => {
-      if (!m || !(m._local || m._streaming)) return false;
-      return Boolean(sid && m._sid === sid);
-    });
+    // Rekord sesji zawiera z definicji tylko WLASNE wiadomosci — nie ma juz
+    // pola _sid do sprawdzania, bo nie ma jak wlozyc tu cudzej banki.
+    const extras = (current || []).filter(
+      (m) => m && (m._local || m._streaming)
+    );
     if (!live.length) return extras.slice();
     return mergeTranscriptWithLocals(live, extras);
   }
@@ -133,9 +99,7 @@
     contentHeightWithoutPad,
     nextChatPadding,
     mergeTranscriptWithLocals,
-    mergeLiveBufferWithLocals,
     loadSessionView,
-    isOrphanLocalForSession,
   };
 
   if (typeof module !== "undefined" && module.exports) {

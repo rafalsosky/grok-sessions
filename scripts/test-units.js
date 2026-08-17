@@ -686,24 +686,6 @@ group("chat-history: dół sesji i merge po transkrypcie");
     assert.strictEqual(out[out.length - 1]._streaming, true);
   });
 
-  test("live bufor bez usera odzyskuje pierwszą lokalną wiadomość", () => {
-    const live = [
-      { role: "assistant", text: "Zaczynam od screenów", _streaming: true },
-    ];
-    const current = [
-      {
-        role: "user",
-        text: "sprawdź swój kod",
-        _local: true,
-        _sid: null,
-      },
-      { role: "assistant", text: "", _streaming: true, _sid: null },
-    ];
-    const out = ch.mergeLiveBufferWithLocals(live, current, "sid-1");
-    assert.strictEqual(out[0].role, "user");
-    assert.strictEqual(out[0].text, "sprawdź swój kod");
-    assert.ok(out.some((m) => m.role === "assistant" && m.text));
-  });
 
   test("follow-up nie wskakuje nad starą odpowiedź Groka", () => {
     const live = [
@@ -716,7 +698,7 @@ group("chat-history: dół sesji i merge po transkrypcie");
     const current = [
       { role: "user", text: "Spoko, zrobiłem restart", _local: true },
     ];
-    const out = ch.mergeLiveBufferWithLocals(live, current, "sid-1");
+    const out = ch.mergeTranscriptWithLocals(live, current);
     assert.strictEqual(out[0].role, "assistant", "user wskoczył na górę historii");
     assert.strictEqual(out[out.length - 1].role, "user");
     assert.strictEqual(out[out.length - 1].text, "Spoko, zrobiłem restart");
@@ -772,30 +754,17 @@ group("chat-history: dół sesji i merge po transkrypcie");
       { role: "user", text: "zadanie A", _sid: "a" },
       { role: "assistant", text: "To nie jest praca w dwóch sesjach", _sid: "a", _streaming: true },
     ];
-    const out = ch.loadSessionView(liveB, viewA, "b");
+    // Po przebudowie widok B NIGDY nie dostaje tablicy A — rekordy sa osobne.
+    // Test pilnuje, ze scalanie nie wciaga niczego spoza podanego live.
+    const out = ch.loadSessionView(liveB, [], "b");
     assert.ok(
       !out.some((m) => /dwóch sesjach/.test(m.text || "")),
       "stream A wyciekł do B"
     );
     assert.ok(out.some((m) => m.text === "odpowiedź B"));
-    assert.strictEqual(
-      out.filter((m) => m._sid && m._sid !== "b").length,
-      0
-    );
+    assert.strictEqual(out.length, liveB.length, "doszlo cos spoza sesji B");
   });
 
-  test("dłuższa historia w widoku wygrywa z krótkim live buforem", () => {
-    const live = [{ role: "assistant", text: "stara odpowiedź", tools: [{}] }];
-    const current = [
-      { role: "user", text: "pierwsza" },
-      { role: "assistant", text: "odp 1" },
-      { role: "user", text: "druga", _local: true },
-    ];
-    const out = ch.mergeLiveBufferWithLocals(live, current, "sid-1");
-    assert.ok(out.length >= 3, "historia ucięta do live bufora");
-    assert.strictEqual(out[0].text, "pierwsza");
-    assert.strictEqual(out[out.length - 1].text, "druga");
-  });
 
   test("nowa tura nie dopisuje do poprzedniej bańki asystenta", () => {
     const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
@@ -849,8 +818,12 @@ group("chat-history: dół sesji i merge po transkrypcie");
       "openSession nadal wipe'uje czat przed await transcript"
     );
     assert.ok(
-      /m\._sid === row\.id/.test(fn[0]),
-      "openSession wpuszcza bańki bez _sid z poprzedniej sesji"
+      !/_sid/.test(fn[0]),
+      "openSession nadal filtruje po _sid — pole usuniete razem z druga kopia stanu"
+    );
+    assert.ok(
+      /const zywe = cur\.allMessages\.filter/.test(fn[0]),
+      "openSession nie bierze zywych baniek z wlasnego rekordu"
     );
   });
 
@@ -868,13 +841,19 @@ group("chat-history: dół sesji i merge po transkrypcie");
     const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
     assert.ok(/pendingNewSession/.test(app), "brak pendingNewSession");
     assert.ok(/function adoptBuildSession/.test(app), "brak adoptBuildSession");
+    // Po zamianie zgadywania na token tury nowy czat NIE zglasza sie juz po
+    // nieznany sid — dostaje swoj z chat:session-started.
     assert.ok(
-      /awaitingOwnNewSession\(\) && !cur\.selectedId/.test(app),
-      "isViewingSession nie trzyma nowej sesji"
+      /onChatSessionStarted/.test(app),
+      "brak adopcji po tokenie tury — wraca zgadywanie po epoce"
     );
     assert.ok(
-      /!streamBySession\[sid\]/.test(app),
-      "nowy czat nadal zgłasza się po sid cudzej sesji"
+      /turnToken !== pendingNewToken/.test(app),
+      "adopcja nie sprawdza, czy sid nalezy do TEJ tury"
+    );
+    assert.ok(
+      /if \(!opts\.zTokenu\) return;/.test(app),
+      "adoptBuildSession wciaz da sie wywolac ze streamu, bez tokenu"
     );
     // Wyscig 17.08: A wyslana, po sekundzie New session i B. Spoznione sid
     // dla A przygarnialo widok B i pytanie z B ladowalo w czacie A.

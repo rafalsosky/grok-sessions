@@ -711,7 +711,7 @@ async function sendHomeChat({
   };
 }
 
-async function sendCodeChat({ text, sessionId, cwd, attachments }) {
+async function sendCodeChat({ text, sessionId, cwd, attachments, turnToken }) {
   const settings = getSettings();
   const workCwd = expandHome(cwd || settings.defaultCwd);
   let sid = sessionId || null;
@@ -735,6 +735,10 @@ async function sendCodeChat({ text, sessionId, cwd, attachments }) {
       // dostawała „pracuje” z sid=null i świeża karta przez całą pierwszą turę
       // stała bez wskaźnika pracy — nie było widać, która sesja liczy.
       pool.markBusy(sid, true);
+      // Token TEJ tury wraca razem z sid. Renderer nie musi zgadywac, do
+      // ktorego nowego czatu nalezy swiezo powstala sesja — przy dwoch
+      // nowych czatach naraz zgadywanie wkladalo pytanie z B do czatu A.
+      send("chat:session-started", { sessionId: sid, turnToken: turnToken || null });
       send("chat:busy", { busy: true, sessionId: sid, mode: "grok" });
       pushSessions();
     }
@@ -951,6 +955,7 @@ function registerIpc() {
           sessionId,
           cwd,
           attachments: attachments || [],
+          turnToken: payload && payload.turnToken,
         });
         if (out && out.sessionId) {
           outSid = out.sessionId;
