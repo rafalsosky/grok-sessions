@@ -3,6 +3,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const { attachRoot, isAllowedPreviewPath } = require("./attachments");
 
 function homeDir(userDataDir) {
   return path.join(userDataDir, "home-chats");
@@ -15,6 +16,9 @@ function ensureDir(userDataDir) {
 }
 
 function chatPath(userDataDir, id) {
+  // Id przychodzi z renderera. Bez tej bramki "../../.." zapisywalo
+  // i kasowalo pliki poza katalogiem danych aplikacji.
+  if (!/^[\w-]{1,128}$/.test(String(id))) throw new Error("bad chat id");
   return path.join(homeDir(userDataDir), `${id}.json`);
 }
 
@@ -27,6 +31,7 @@ function newId() {
 function pruneEmptyHomeChats(userDataDir) {
   const d = ensureDir(userDataDir);
   let removed = 0;
+  const zostaly = [];
   for (const name of fs.readdirSync(d)) {
     if (!name.endsWith(".json")) continue;
     const full = path.join(d, name);
@@ -37,33 +42,31 @@ function pruneEmptyHomeChats(userDataDir) {
       if (empty && untitled) {
         fs.unlinkSync(full);
         removed += 1;
+      } else {
+        zostaly.push(raw);
       }
     } catch {
       /* skip broken */
     }
   }
-  return removed;
+  return { removed, zostaly };
 }
 
 function listHomeChats(userDataDir) {
-  pruneEmptyHomeChats(userDataDir);
-  const d = ensureDir(userDataDir);
+  // Kazde odswiezenie listy parsowalo WSZYSTKIE pliki czatow dwa razy:
+  // raz w prune, raz tutaj. Prune oddaje teraz to, co przezylo.
+  const { zostaly } = pruneEmptyHomeChats(userDataDir);
   const rows = [];
-  for (const name of fs.readdirSync(d)) {
-    if (!name.endsWith(".json")) continue;
-    try {
-      const raw = JSON.parse(fs.readFileSync(path.join(d, name), "utf8"));
-      rows.push({
-        id: raw.id,
-        title: raw.title || "New chat",
-        createdAt: raw.createdAt,
-        updatedAt: raw.updatedAt,
-        messageCount: (raw.messages || []).length,
-        kind: "home",
-      });
-    } catch {
-      /* skip */
-    }
+  for (const raw of zostaly) {
+    if (!raw || !raw.id) continue;
+    rows.push({
+      id: raw.id,
+      title: raw.title || "New chat",
+      createdAt: raw.createdAt,
+      updatedAt: raw.updatedAt,
+      messageCount: (raw.messages || []).length,
+      kind: "home",
+    });
   }
   rows.sort((a, b) => Date.parse(b.updatedAt || 0) - Date.parse(a.updatedAt || 0));
   return rows;
@@ -78,7 +81,11 @@ function loadHomeChat(userDataDir, id) {
 function saveHomeChat(userDataDir, chat) {
   ensureDir(userDataDir);
   const p = chatPath(userDataDir, chat.id);
-  fs.writeFileSync(p, JSON.stringify(chat, null, 2), "utf8");
+  // Zapis w miejscu: przerwanie w polowie zostawialo ucięty JSON i czat
+  // znikal bez sladu. rename na tym samym wolumenie jest atomowy.
+  const tmp = `${p}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(chat, null, 2), "utf8");
+  fs.renameSync(tmp, p);
   return chat;
 }
 
@@ -96,6 +103,23 @@ function createHomeChat(userDataDir, title = "New chat") {
 
 function deleteHomeChat(userDataDir, id) {
   const p = chatPath(userDataDir, id);
+  // Pliki zalacznikow zostawaly na dysku po skasowaniu czatu — audyt zmierzyl
+  // 37 MB przy jednej rozmowie. Kasujemy TYLKO to, co lezy w naszym katalogu.
+  try {
+    const chat = loadHomeChat(userDataDir, id);
+    const root = attachRoot(userDataDir);
+    const sciezki = [];
+    for (const m of (chat && chat.messages) || []) {
+      for (const grupa of [m.attachments, m.images, m.videos]) {
+        for (const a of grupa || []) if (a && a.path) sciezki.push(a.path);
+      }
+    }
+    for (const f of sciezki) {
+      if (isAllowedPreviewPath(root, f)) fs.rmSync(f, { force: true });
+    }
+  } catch {
+    /* uszkodzony plik czatu nie ma blokowac kasowania */
+  }
   if (fs.existsSync(p)) fs.unlinkSync(p);
   return { ok: true };
 }

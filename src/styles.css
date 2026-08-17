@@ -825,6 +825,13 @@ select {
   font-weight: 650;
 }
 
+.msg-content .md-quote {
+  margin: 0.35em 0 0.6em;
+  padding: 0.1em 0 0.1em 0.85em;
+  border-left: 2px solid var(--border);
+  color: var(--muted);
+}
+
 .msg-content .md-hr {
   border: none;
   border-top: 1px solid var(--border);

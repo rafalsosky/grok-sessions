@@ -19,7 +19,11 @@ function loadFlags(userDataDir) {
 
 function saveFlags(userDataDir, flags) {
   fs.mkdirSync(userDataDir, { recursive: true });
-  fs.writeFileSync(flagsPath(userDataDir), JSON.stringify(flags, null, 2));
+  // Atomowo: przerwanie w polowie zostawialo ucięty JSON i wszystkie flagi
+  // (przypiete / nieprzeczytane) znikaly.
+  const p = flagsPath(userDataDir);
+  fs.writeFileSync(`${p}.tmp`, JSON.stringify(flags, null, 2));
+  fs.renameSync(`${p}.tmp`, p);
   return flags;
 }
 

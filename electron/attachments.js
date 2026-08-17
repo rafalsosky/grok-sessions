@@ -80,6 +80,11 @@ function importPath(userDataDir, srcPath) {
       isDir: true,
     };
   }
+  // Ten sam limit co przy wklejaniu — importPath kopiowal plik dowolnej
+  // wielkosci, synchronicznie, wiec 2 GB zamrazalo caly proces glowny.
+  if (st.size > MAX_ATTACH_BYTES) {
+    return { ok: false, error: "File too large (max 20 MB)" };
+  }
   const root = attachRoot(userDataDir);
   const base = path.basename(srcPath);
   const id = crypto.randomBytes(4).toString("hex");

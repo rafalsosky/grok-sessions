@@ -456,10 +456,24 @@ group("home-chats: replaceMessages nadpisuje plik");
       role: "user",
       content: "hej",
     });
-    const n = hc.pruneEmptyHomeChats(dir);
-    assert.ok(n >= 1);
+    const { removed, zostaly } = hc.pruneEmptyHomeChats(dir);
+    assert.ok(removed >= 1);
     assert.strictEqual(hc.loadHomeChat(dir, empty.id), null);
     assert.ok(hc.loadHomeChat(dir, filled.id));
+    // prune oddaje sparsowane czaty, ktore przezyly — listHomeChats nie czyta
+    // katalogu drugi raz.
+    assert.ok(zostaly.some((c) => c.id === filled.id), "prune nie oddaje ocalalych");
+    assert.ok(!zostaly.some((c) => c.id === empty.id));
+  });
+
+  test("id czatu Home nie moze wyjsc poza katalog danych", () => {
+    assert.throws(() => hc.loadHomeChat(dir, "../../../etc/passwd"), /bad chat id/);
+    assert.throws(() => hc.deleteHomeChat(dir, "../evil"), /bad chat id/);
+  });
+
+  test("zapis czatu jest atomowy (rename, nie zapis w miejscu)", () => {
+    const src = fs.readFileSync(path.join(ROOT, "electron", "home-chats.js"), "utf8");
+    assert.ok(/renameSync\(/.test(src), "brak atomowego zapisu — ucięty JSON kasuje czat");
   });
 
   fs.rmSync(dir, { recursive: true, force: true });

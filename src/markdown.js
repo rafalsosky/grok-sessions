@@ -50,7 +50,7 @@ function normalizeMarkdown(src) {
   // Heading glued after text: "…id .## Title" or "…id## Title"
   // Kropka musi WROCIC do tekstu. `\.?` bylo dopasowywane i nieoddawane,
   // wiec „Gotowe. Dziala.” przed naglowkiem gubilo kropke (168 razy w korpusie).
-  t = t.replace(/([^\n#])\s*(\.?)(\s*)(#{1,4})\s+/g, "$1$2\n\n$4 ");
+  t = t.replace(/(?<!\|[ \t]*)([^\n#|])\s*(\.?)(\s*)(#{1,4})\s+/g, "$1$2\n\n$4 ");
   // Heading then immediate table on same line: "## Title| A | B |"
   t = t.replace(/^(#{1,4}\s+[^|\n]+)\|/gm, "$1\n\n|");
 
@@ -191,6 +191,31 @@ function unglueSentences(t) {
   return t;
 }
 
+/**
+ * Kod inline i wiersze tabel chowamy przed unglueSentences. Regula
+ * „polskie slowo sklejone z Wielka Litera” rozbijala `src/appJs`, sciezki
+ * i komorki tabel, wstawiajac pusta linie w srodku identyfikatora.
+ */
+function ungluePoza(t) {
+  const schowek = [];
+  const zachowaj = (m) => {
+    schowek.push(m);
+    return `\u0002${schowek.length - 1}\u0002`;
+  };
+  let x = t.replace(/`[^`\n]*`/g, zachowaj);
+  x = x
+    .split("\n")
+    .map((ln) => (ln.trim().startsWith("|") ? zachowaj(ln) : ln))
+    .join("\n");
+  x = unglueSentences(x);
+  // Placeholder kodu inline moze siedziec WEWNATRZ schowanego wiersza tabeli,
+  // wiec jeden przebieg nie wystarczy — rozwijamy az do skutku.
+  for (let i = 0; i < 5 && /\u0002\d+\u0002/.test(x); i++) {
+    x = x.replace(/\u0002(\d+)\u0002/g, (_, n) => schowek[Number(n)] ?? "");
+  }
+  return x;
+}
+
 function renderMarkdown(src) {
   if (!src) return "";
   // KOLEJNOŚĆ JEST NOŚNA: najpierw wycinamy bloki kodu, dopiero potem
@@ -221,7 +246,7 @@ function renderMarkdown(src) {
   });
 
   text = normalizeMarkdown(text);
-  text = unglueSentences(text);
+  text = ungluePoza(text);
 
   // Split into blocks by blank lines, but keep table/list clusters
   const lines = text.split("\n");
@@ -331,6 +356,22 @@ function renderMarkdown(src) {
       continue;
     }
 
+    // Cytat blokowy. Wczesniej „> tekst” szlo do czatu doslownie, ze znakiem
+    // wiekszosci, i sklejalo sie w jeden akapit.
+    if (/^>\s?/.test(trimmed)) {
+      const linie = [];
+      while (i < lines.length && /^>\s?/.test(lines[i].trim())) {
+        linie.push(lines[i].trim().replace(/^>\s?/, ""));
+        i++;
+      }
+      out.push(
+        `<blockquote class="md-quote">${inlineFormatKeepBr(
+          linie.join(BR)
+        )}</blockquote>`
+      );
+      continue;
+    }
+
     // Paragraph (collect until blank / special).
     // „linia  \nnastępna” (dwie spacje = twardy łamacz GFM) zostaje łamana,
     // reszta zdań scala się w JEDEN akapit — gęstość jak u Claude.
@@ -343,6 +384,7 @@ function renderMarkdown(src) {
       !/^[-*]\s+/.test(lines[i].trim()) &&
       !/^\d+\.\s+/.test(lines[i].trim()) &&
       !/^\u0000BLOCK/.test(lines[i].trim()) &&
+      !/^>\s?/.test(lines[i].trim()) &&
       !(
         lines[i].includes("|") &&
         lines[i].indexOf("|") !== lines[i].lastIndexOf("|")

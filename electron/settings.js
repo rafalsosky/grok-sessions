@@ -127,11 +127,11 @@ function saveSettings(userDataDir, partial) {
     language: LANGS.includes(next.language) ? next.language : "en",
   };
   fs.mkdirSync(userDataDir, { recursive: true });
-  fs.writeFileSync(
-    settingsPath(userDataDir),
-    JSON.stringify(toWrite, null, 2),
-    "utf8"
-  );
+  // Atomowo: ucięty plik ustawien wywalal apke do wartosci domyslnych
+  // (razem ze sciezka do grok i wyborem jezyka).
+  const sp = settingsPath(userDataDir);
+  fs.writeFileSync(`${sp}.tmp`, JSON.stringify(toWrite, null, 2), "utf8");
+  fs.renameSync(`${sp}.tmp`, sp);
   return loadSettings(userDataDir);
 }
 
