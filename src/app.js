@@ -3051,6 +3051,16 @@
     if (mode === "grok") detachedBuild = false;
     const sessionId = cur.liveSessionId || cur.selectedId || null;
     const turnMode = mode;
+    const selected = selectedRow();
+    const heavyCtx = Number(
+      (selected && (selected.numChatMessages || selected.numMessages)) || 0
+    );
+    if (turnMode === "grok" && heavyCtx > 40) {
+      showToast(
+        tr("Long session — first reply will be slow. New session is faster."),
+        "ok"
+      );
+    }
     pendingNewSession = !sessionId;
     const turnToken = `t${++turnSeq}`;
     if (pendingNewSession) {
@@ -3987,7 +3997,14 @@
     const wantId = mode === "home" ? lastHome : lastCode;
     if (wantId) {
       const row = rowsForMode().find((r) => r.id === wantId);
-      if (row) await openSession(row);
+      // Stara sesja audytu (100+ wiadomości) wczytana przy starcie
+      // zjada pierwszy prompt: model myśli nad całą historią, UI stoi
+      // na „Myślę…”. Nowa karta. Starą widać na liście.
+      const heavy =
+        mode === "grok" &&
+        row &&
+        Number(row.numChatMessages || row.numMessages || 0) > 40;
+      if (row && !heavy) await openSession(row);
     }
     bootDone = true;
     el.input.focus();

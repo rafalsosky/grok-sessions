@@ -89,6 +89,8 @@ const PL = {
   Error: "Błąd",
   "Agent is working…": "Agent pracuje…",
   "Agent starting…": "Agent startuje…",
+  "Long session — first reply will be slow. New session is faster.":
+    "Długa sesja — pierwsza odpowiedź będzie wolna. Nowa sesja jest szybsza.",
   "Queue → one message…": "Kolejka → jedna wiadomość…",
 
   // Narzędzia (etykiety zamiast surowych komend)
