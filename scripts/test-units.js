@@ -1127,6 +1127,35 @@ group("chat-scroll: user na górze zostaje na górze");
 group("stan sesji: jedna mapa, zero recznej synchronizacji");
 {
   const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+  test("renderer jedzie w trybie scislym — ciche globalne rzucaja", () => {
+    // 17.08: brakujace `cur.` w jednym przypisaniu utworzylo po cichu zmienna
+    // globalna, a pushAll wrzucil TEN SAM obiekt drugi raz. Jedna odpowiedz
+    // malowala sie trzy razy. W trybie scislym to rzuca ReferenceError.
+    const glowa = app.slice(0, app.indexOf("const api"));
+    assert.ok(/"use strict";/.test(glowa), "app.js nie jest w trybie scislym");
+  });
+
+  test("stan sesji nigdy nie jest przypisywany z pominieciem cur.", () => {
+    const kod = app
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+      .replace(/\/\/[^\n]*/g, (m) => m.replace(/[^\n]/g, " "));
+    const pola = [
+      "allMessages", "widoczne", "streamingAssistant", "liveTools", "livePlan",
+      "attachments", "messageQueue", "visibleCount", "showActivity",
+      "selectedId", "liveSessionId",
+    ];
+    const zle = [];
+    for (const n of pola) {
+      const re = new RegExp("(^|[^.\\w$])" + n + "\\s*=[^=]", "gm");
+      let m;
+      while ((m = re.exec(kod))) {
+        const nr = kod.slice(0, m.index).split("\n").length;
+        zle.push(n + " w linii " + nr);
+      }
+    }
+    assert.deepStrictEqual(zle, [], "przypisanie z pominieciem cur.: " + zle.join(", "));
+  });
+
   test("nie ma juz drugiej ani trzeciej kopii stanu", () => {
     assert.ok(!/const bags = \{/.test(app), "bags wrocilo jako druga kopia");
     assert.ok(!/function emptyBag/.test(app), "emptyBag wrocil");

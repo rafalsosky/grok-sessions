@@ -1,6 +1,11 @@
 /* global grokSessions, renderMarkdown, appendStreamChunk, workSummary, chatScroll */
 
 (() => {
+  // Tryb scisly. Bez niego literowka w przypisaniu (brakujace `cur.`) po cichu
+  // tworzyla zmienna globalna zamiast rzucic bledem — a `pushAll` wrzucal do
+  // tablicy TEN SAM obiekt drugi raz i jedna odpowiedz malowala sie trzy razy.
+  "use strict";
+
   /**
    * tr() zamiast t(): w tym pliku „t” jest zajęte przez zmienne pętli po
    * narzędziach. Brak i18n = angielski, czyli tekst źródłowy.
@@ -1777,14 +1782,14 @@
     cur.livePlan = [];
     // Kolejka należy do SESJI, nie do okna. Zerowanie jej tutaj kasowało
     // dopowiedzenia napisane w A, gdy user zajrzał do B i wrócił.
-    messageQueue = (
+    cur.messageQueue = (
       (streamBySession[row.id] && streamBySession[row.id].messageQueue) ||
       []
     ).slice();
     clearForeignSessionChrome();
     // Zalaczniki naleza do SESJI, tak jak kolejka. clearForeignSessionChrome
     // je zerowalo, wiec zajrzenie do innej karty kasowalo przygotowane pliki.
-    attachments = (
+    cur.attachments = (
       (streamBySession[row.id] && streamBySession[row.id].attachments) ||
       []
     ).slice();
@@ -2032,7 +2037,7 @@
       return last;
     }
     // Finished reply sitting last — never reopen it. New bubble.
-    streamingAssistant = {
+    cur.streamingAssistant = {
       id: `stream-${Date.now()}`,
       role: "assistant",
       text: "",
@@ -3082,7 +3087,7 @@
     // BEZ allMessages.length: syncVisibleMessages i tak tnie OGON, wiec swieze
     // banki zawsze sa w widoku, a paginacja przestawala dzialac po pierwszej
     // wysylce i kolejny pelny render budowal 1000+ baniek naraz.
-    visibleCount = Math.max(cur.visibleCount, PAGE);
+    cur.visibleCount = Math.max(cur.visibleCount, PAGE);
     syncVisibleMessages();
     if (toAppend.length) {
       appendMessageRows(toAppend, { stick: true });
