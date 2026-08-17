@@ -24,12 +24,9 @@ function appendStreamChunk(prev, chunk) {
   if (!a) return b;
   const aEnd = a.replace(/\s+$/, "");
   const bStart = b.replace(/^\s+/, "");
-  if (!bStart) return a;
+  if (!bStart) return a + b;
   if (/[.!?…]["”')\]]?$/.test(aEnd) && /^[A-ZĄĆĘŁŃÓŚŹŻ]/.test(bStart)) {
     return aEnd + "\n\n" + bStart;
-  }
-  if (/[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż0-9]$/.test(aEnd) && /^[A-Za-zĄĆĘŁŃÓŚŹŻąćęłńóśźż]/.test(bStart)) {
-    return aEnd + " " + bStart;
   }
   return a + b;
 }

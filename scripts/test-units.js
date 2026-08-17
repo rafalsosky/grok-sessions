@@ -140,7 +140,10 @@ group("markdown: bloki kodu i bezpieczeństwo");
       appendStreamChunk("Hello. ", "World"),
       "Hello.\n\nWorld"
     );
-    assert.strictEqual(appendStreamChunk("abc", "def"), "abc def");
+    // letter chunks must glue, or "Jasne" becomes "J as ne"
+    assert.strictEqual(appendStreamChunk("J", "as"), "Jas");
+    assert.strictEqual(appendStreamChunk("Jas", "ne"), "Jasne");
+    assert.strictEqual(appendStreamChunk("abc", "def"), "abcdef");
   });
 
   test("pogrubiony tytuł nie zjada reszty akapitu", () => {
@@ -661,6 +664,36 @@ group("chat-history: dół sesji i merge po transkrypcie");
     assert.ok(out.some((m) => m.role === "assistant" && m.text));
   });
 
+  test("follow-up nie wskakuje nad starą odpowiedź Groka", () => {
+    const live = [
+      {
+        role: "assistant",
+        text: "Zaczynam od screenów",
+        tools: [{ title: "read_file" }, { title: "grep" }],
+      },
+    ];
+    const current = [
+      { role: "user", text: "Spoko, zrobiłem restart", _local: true },
+    ];
+    const out = ch.mergeLiveBufferWithLocals(live, current, "sid-1");
+    assert.strictEqual(out[0].role, "assistant", "user wskoczył na górę historii");
+    assert.strictEqual(out[out.length - 1].role, "user");
+    assert.strictEqual(out[out.length - 1].text, "Spoko, zrobiłem restart");
+  });
+
+  test("dłuższa historia w widoku wygrywa z krótkim live buforem", () => {
+    const live = [{ role: "assistant", text: "stara odpowiedź", tools: [{}] }];
+    const current = [
+      { role: "user", text: "pierwsza" },
+      { role: "assistant", text: "odp 1" },
+      { role: "user", text: "druga", _local: true },
+    ];
+    const out = ch.mergeLiveBufferWithLocals(live, current, "sid-1");
+    assert.ok(out.length >= 3, "historia ucięta do live bufora");
+    assert.strictEqual(out[0].text, "pierwsza");
+    assert.strictEqual(out[out.length - 1].text, "druga");
+  });
+
   test("nowa tura nie dopisuje do poprzedniej bańki asystenta", () => {
     const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
     assert.ok(
@@ -674,6 +707,10 @@ group("chat-history: dół sesji i merge po transkrypcie");
     assert.ok(
       /after !== streamingAssistant/.test(app),
       "ensureStreamingAssistant nie odpuszcza starej bańki po wiadomości usera"
+    );
+    assert.ok(
+      /emptyShell/.test(app),
+      "ensureStreamingAssistant nadal otwiera starą odpowiedź z narzędziami"
     );
   });
 

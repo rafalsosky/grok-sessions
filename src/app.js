@@ -1879,11 +1879,17 @@
       }
     }
     const last = lastAll();
-    if (last && last.role === "assistant") {
+    const emptyShell =
+      last &&
+      last.role === "assistant" &&
+      !String(last.text || "").trim() &&
+      !(last.tools && last.tools.length);
+    if (emptyShell) {
       streamingAssistant = last;
       last._streaming = true;
       return last;
     }
+    // Finished reply sitting last — never reopen it. New bubble.
     streamingAssistant = {
       id: `stream-${Date.now()}`,
       role: "assistant",
