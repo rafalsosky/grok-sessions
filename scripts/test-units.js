@@ -465,11 +465,18 @@ group("build: New session odłącza bieżącą turę");
   const acp = fs.readFileSync(path.join(ROOT, "electron", "acp-client.js"), "utf8");
   const xai = fs.readFileSync(path.join(ROOT, "electron", "xai-api.js"), "utf8");
 
-  test("newChat w Build woła Stop zanim wyczyści widok", () => {
+  test("newChat w Build nie zabija pracującej sesji", () => {
     const fn = app.match(/async function newChat\(\) \{[\s\S]*?\n  \}/);
     assert.ok(fn, "brak newChat");
-    assert.ok(/chatStop/.test(fn[0]), "newChat nie przerywa agenta");
     assert.ok(/mode === "grok"/.test(fn[0]), "newChat nie rozróżnia Build");
+    assert.ok(
+      !/chatStop\(\{\s*mode:\s*"grok"/.test(fn[0]),
+      "New session nadal zabija agenta pierwszej sesji"
+    );
+    assert.ok(
+      /snapshotCurrentBuildSession/.test(fn[0]),
+      "New session kasuje bufor pracującej sesji zamiast go odłożyć"
+    );
   });
 
   test("newChat w Home przerywa myślenie i nie tworzy pustego pliku", () => {
@@ -506,8 +513,8 @@ group("build: New session odłącza bieżącą turę");
     const block = main.match(/ipcMain\.handle\("chat:set-model"[\s\S]*?\n  \}\);/);
     assert.ok(block, "brak chat:set-model");
     assert.ok(
-      /promptBusy\.grok/.test(block[0]),
-      "zmiana modelu w Build nie sprawdza, czy tura leci"
+      /isBusy/.test(block[0]),
+      "zmiana modelu w Build nie sprawdza, czy TA sesja leci"
     );
   });
 
@@ -548,14 +555,14 @@ group("build: New session odłącza bieżącą turę");
 
   test("przełączenie najnowszego modelu nie rusza tury w toku", () => {
     assert.ok(
-      /promptBusy\.grok/.test(main) && /alwaysLatestModel/.test(main),
+      /isBusy/.test(main) && /alwaysLatestModel/.test(main),
       "brak wartownika alwaysLatest vs tura"
     );
-    const block = main.match(/acp\.on\("models"[\s\S]*?\}\);/);
-    assert.ok(block, "brak handlera models");
+    const block = main.match(/client\.on\("models"[\s\S]*?\}\);/);
+    assert.ok(block, "brak handlera models na kliencie puli");
     assert.ok(
-      /promptBusy/.test(block[0]),
-      "handler models nie sprawdza, czy agent pracuje"
+      /isBusy/.test(block[0]),
+      "handler models nie sprawdza, czy TEN agent pracuje"
     );
   });
 
@@ -882,6 +889,119 @@ group("electron: twarde zabezpieczenia w main.js");
   const mk = fs.readFileSync(path.join(ROOT, "scripts", "make-app.sh"), "utf8");
   test("launcher .app nie wyłącza piaskownicy", () =>
     assert.ok(!mk.includes("--no-sandbox")));
+}
+
+/* ── 7b. Pula agentów: dwie sesje = dwa procesy ───────────────────────
+   Jeden AcpClient na całą apkę: Enter w B robił session/load na procesie A
+   i pierwsza sesja umierała. New session wołał Stop. */ 
+group("agent-pool: sesje jak karty terminala");
+{
+  const { createAgentPool } = require("../electron/agent-pool");
+  const pool = createAgentPool();
+  const a = { sessionId: "sid-a", stopCalls: 0, stop() { this.stopCalls++; } };
+  const b = { sessionId: "sid-b", stopCalls: 0, stop() { this.stopCalls++; } };
+  pool.put("sid-a", a);
+  pool.put("sid-b", b);
+  pool.markBusy("sid-a", true);
+
+  test("dwie sesje to dwaj klienci", () => {
+    assert.strictEqual(pool.get("sid-a"), a);
+    assert.strictEqual(pool.get("sid-b"), b);
+    assert.strictEqual(pool.ids().length, 2);
+  });
+  test("busy A nie blokuje B", () => {
+    assert.strictEqual(pool.isBusy("sid-a"), true);
+    assert.strictEqual(pool.isBusy("sid-b"), false);
+  });
+  test("stop A nie rusza B", () => {
+    pool.stop("sid-a");
+    assert.strictEqual(a.stopCalls, 1);
+    assert.strictEqual(b.stopCalls, 0);
+    assert.strictEqual(pool.has("sid-a"), false);
+    assert.strictEqual(pool.has("sid-b"), true);
+    assert.strictEqual(pool.isBusy("sid-a"), false);
+  });
+
+  const main = fs.readFileSync(path.join(ROOT, "electron", "main.js"), "utf8");
+  const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+  test("chat:send nie ma globalnego promptBusy.grok", () => {
+    const block = main.match(/ipcMain\.handle\("chat:send"[\s\S]*?\n  \}\);/);
+    assert.ok(block, "brak chat:send");
+    assert.ok(
+      !/if \(promptBusy\[lane\]\)/.test(block[0]),
+      "druga sesja nadal stoi za jedną flagą promptBusy"
+    );
+    assert.ok(
+      /isBusy/.test(block[0]),
+      "chat:send nie sprawdza busy per sesja"
+    );
+  });
+  test("chat:open nie ładuje sesji na wspólnym procesie", () => {
+    const block = main.match(/ipcMain\.handle\("chat:open"[\s\S]*?\n  \}\);/);
+    assert.ok(block, "brak chat:open");
+    assert.ok(
+      !/ensureSession/.test(block[0]),
+      "otwarcie B nadal robi session/load na agencie A"
+    );
+  });
+  test("chat:stop wymaga sessionId i nie zabija puli", () => {
+    const block = main.match(/ipcMain\.handle\("chat:stop"[\s\S]*?\n  \}\);/);
+    assert.ok(block, "brak chat:stop");
+    assert.ok(/payload\.sessionId|sessionId/.test(block[0]), "Stop bez sessionId");
+    assert.ok(/pool\.stop/.test(block[0]), "Stop nie idzie w pulę");
+    assert.ok(
+      !/acp = null/.test(block[0]),
+      "Stop nadal zeruje jedynego agenta"
+    );
+  });
+  test("UI nie blokuje composera bo pracuje inna sesja", () => {
+    assert.ok(
+      !/Agent is working in another Build session/.test(app),
+      "composer nadal udaje, że jest jeden agent"
+    );
+  });
+}
+
+/* ── 7c. Scroll: pisanie nie porywa widoku ────────────────────────────
+   holdStick + rAF ustawiające stickToBottom=true = nie da się czytać
+   od góry, gdy agent jeszcze pisze. */
+group("chat-scroll: user na górze zostaje na górze");
+{
+  const cs = require("../src/chat-scroll");
+  const box = { scrollHeight: 2000, scrollTop: 40, clientHeight: 400 };
+  test("przy dole follow jest włączony", () => {
+    assert.strictEqual(cs.isNearBottom(box, 80), false);
+    box.scrollTop = 1600;
+    assert.strictEqual(cs.isNearBottom(box, 80), true);
+  });
+  test("scroll w górę wyłącza follow, chunk nie ciągnie", () => {
+    const s = cs.createChatScroll();
+    s.pin();
+    box.scrollTop = 40;
+    s.onUserScroll(box);
+    assert.strictEqual(s.shouldFollow(), false);
+    assert.strictEqual(s.applyBottom(box), false);
+    assert.strictEqual(box.scrollTop, 40);
+  });
+  test("programowy scroll nie zbiją stick", () => {
+    const s = cs.createChatScroll();
+    s.pin();
+    s.withProgrammatic(() => {
+      box.scrollTop = 0;
+      s.onUserScroll(box);
+    });
+    assert.strictEqual(s.shouldFollow(), true);
+  });
+  const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+  test("app.js nie resetuje stick w rAF po każdym chunku", () => {
+    assert.ok(/chatScroll\.createChatScroll|createChatScroll\(/.test(app), "brak chat-scroll w UI");
+    const fn = app.match(/function scrollChatToBottom[\s\S]*?\n  \}/);
+    assert.ok(fn, "brak scrollChatToBottom");
+    assert.ok(
+      !/stickToBottom = true/.test(fn[0]),
+      "rAF nadal wymusza stickToBottom = true"
+    );
+  });
 }
 
 /* ── 8. Pobieranie wygenerowanych plików ──────────────────────────────

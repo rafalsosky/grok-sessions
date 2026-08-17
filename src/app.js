@@ -1,4 +1,4 @@
-/* global grokSessions, renderMarkdown, appendStreamChunk, workSummary */
+/* global grokSessions, renderMarkdown, appendStreamChunk, workSummary, chatScroll */
 
 (() => {
   /**
@@ -40,8 +40,18 @@
   let effortLevel = "high";
   /** "auto" = agent bez pytania, "ask" = zatwierdzam każde narzędzie */
   let permMode = "auto";
-  /** Session ID where agent is currently working (only that row shows „pracuje”) */
+  /** Sesje Build, które teraz mają własny proces. Nie jedna na całą apkę. */
+  const busySessionIds = new Set();
   let busySessionId = null;
+  function isSessionBusy(sid) {
+    return Boolean(sid && busySessionIds.has(sid));
+  }
+  function setSessionBusy(sid, on) {
+    if (!sid) return;
+    if (on) busySessionIds.add(sid);
+    else busySessionIds.delete(sid);
+    busySessionId = busySessionIds.values().next().value || null;
+  }
   /** New session: nie wciągaj Thinking ze starej tury, dopóki nie wyślesz. */
   let detachedBuild = false;
   /** New Build chat: session id still unknown — keep stream on this view. */
@@ -347,16 +357,14 @@
       "starting",
       "queued",
     ];
-    const sid = opts.sessionId || busySessionId || null;
-    // TWARDY GATE: status streamu NIGDY na obcej sesji
+    const sid = opts.sessionId || null;
     if (
+      sid &&
       mode === "grok" &&
       streamPhases.includes(phase) &&
-      busySessionId &&
-      selectedId &&
-      selectedId !== busySessionId
+      !isViewingSession(sid)
     ) {
-      const buf = ensureSessionStream(busySessionId);
+      const buf = ensureSessionStream(sid);
       if (buf) {
         buf.statusPhase = phase;
         buf.statusDetail = detail || "";
@@ -653,8 +661,7 @@
       el.list.appendChild(lab);
       for (const r of items) {
         const li = document.createElement("li");
-        const isWorking =
-          mode === "grok" && busySessionId && r.id === busySessionId;
+        const isWorking = mode === "grok" && isSessionBusy(r.id);
         const isTerminalLive = Boolean(r.isActive) && !isWorking;
         const fl = sessionFlagMap[r.id] || {};
         li.className =
@@ -724,72 +731,79 @@
     return "⚙";
   }
 
-  /** User scrolled up while agent works → nie ciągnij na dół. */
+  const scroller = (window.chatScroll && window.chatScroll.createChatScroll)
+    ? window.chatScroll.createChatScroll({ nearBottomPx: 80 })
+    : {
+        shouldFollow: () => true,
+        pin() {},
+        release() {},
+        onUserScroll() { return true; },
+        withProgrammatic(fn) { return fn(); },
+        applyBottom(box) {
+          if (!box) return false;
+          box.scrollTop = Math.max(0, box.scrollHeight - box.clientHeight);
+          return true;
+        },
+        isProgrammatic: () => false,
+      };
   let stickToBottom = true;
-  /** True podczas programowego scrolla — handler nie gasi stickToBottom. */
   let scrollingProgrammatically = false;
   let scrollBottomTimer = 0;
-  /** Po otwarciu sesji / Enter ignoruj fałszywe „user scrolled up”. */
-  let holdStickUntil = 0;
 
-  function holdStick(ms) {
-    stickToBottom = true;
-    holdStickUntil = Date.now() + (Number(ms) || 0);
+  function syncStickFlag() {
+    stickToBottom = scroller.shouldFollow();
   }
 
-  function nearBottom(threshold = 120) {
+  function holdStick() {
+    /* user scroll always wins — nie blokuj czytania od góry */
+    scroller.pin();
+    stickToBottom = true;
+  }
+
+  function nearBottom(threshold = 80) {
     const box = el.chatScroll;
     if (!box) return true;
+    if (window.chatScroll && window.chatScroll.isNearBottom) {
+      return window.chatScroll.isNearBottom(box, threshold);
+    }
     return box.scrollHeight - box.scrollTop - box.clientHeight < threshold;
   }
 
-  /**
-   * Stick tylko gdy user jest na dole (albo właśnie wysłał).
-   * NIGDY „bo busy” — to powodowało przelot przez całą sesję.
-   */
   function shouldStickBottom(force) {
     if (force) return true;
-    if (!stickToBottom) return false;
-    return nearBottom(120);
+    return scroller.shouldFollow();
   }
 
   /**
-   * @param {boolean} [force] — true = Enter / nowa tura (zawsze na dół)
-   * NIE używamy scrollIntoView — potrafi scrollować zły kontener i skakać na górę.
-   * Tylko scrollTop na #chat-scroll.
+   * @param {boolean} [force] — true = Enter / nowa tura (pin + dół)
+   * Chunk streamu woła bez force. Jak user czyta od góry, nic nie ruszamy.
    */
   function scrollChatToBottom(force) {
     const box = el.chatScroll;
     if (!box) return;
-    if (!force && !stickToBottom) return;
-    if (force) stickToBottom = true;
+    if (force) scroller.pin();
+    if (!force && !scroller.shouldFollow()) return;
 
-    scrollingProgrammatically = true;
     const go = () => {
       const b = el.chatScroll;
-      if (!b) return;
-      // max scroll — nie polegaj na scrollHeight w trakcie flex layout
-      const max = Math.max(0, b.scrollHeight - b.clientHeight);
-      b.scrollTop = max > 0 ? max : b.scrollHeight;
+      if (!b || !scroller.shouldFollow()) return;
+      scrollingProgrammatically = true;
+      scroller.withProgrammatic(() => {
+        const max = Math.max(0, b.scrollHeight - b.clientHeight);
+        b.scrollTop = max > 0 ? max : b.scrollHeight;
+      });
+      scrollingProgrammatically = false;
     };
     go();
-    // layout po replaceChildren bywa o 1–2 klatki opóźniony
     requestAnimationFrame(() => {
       go();
-      requestAnimationFrame(() => {
-        go();
-        scrollingProgrammatically = false;
-        stickToBottom = true;
-      });
+      requestAnimationFrame(go);
     });
-    // belka: po fontach / markdown height może urosnąć później
     if (scrollBottomTimer) clearTimeout(scrollBottomTimer);
     scrollBottomTimer = setTimeout(() => {
       scrollBottomTimer = 0;
-      if (!force && !stickToBottom) return;
-      scrollingProgrammatically = true;
+      if (!scroller.shouldFollow()) return;
       go();
-      scrollingProgrammatically = false;
     }, 50);
   }
 
@@ -816,10 +830,10 @@
       if (h === lastH) stable++;
       else stable = 0;
       lastH = h;
-      if (stickToBottom) {
+      if (scroller.shouldFollow()) {
         layoutChatBottom();
         scrollingProgrammatically = true;
-        box.scrollTop = Math.max(0, box.scrollHeight - box.clientHeight);
+        scroller.applyBottom(box);
         scrollingProgrammatically = false;
       }
       if (++ticks > 20 || stable >= 3) {
@@ -836,13 +850,9 @@
     box.addEventListener(
       "scroll",
       () => {
-        if (scrollingProgrammatically) return;
-        if (Date.now() < holdStickUntil) {
-          stickToBottom = true;
-          return;
-        }
-        // blisko dołu → znowu follow; wyżej → nie ruszaj
-        stickToBottom = nearBottom(80);
+        if (scrollingProgrammatically || scroller.isProgrammatic?.()) return;
+        scroller.onUserScroll(box);
+        syncStickFlag();
       },
       { passive: true }
     );
@@ -855,10 +865,9 @@
         if (!allMessages.length) return;
         layoutChatBottom();
         // treść urosła, a user trzymał dół → dociągnij
-        if (stickToBottom) {
+        if (scroller.shouldFollow()) {
           scrollingProgrammatically = true;
-          const b = el.chatScroll;
-          if (b) b.scrollTop = Math.max(0, b.scrollHeight - b.clientHeight);
+          scroller.applyBottom(el.chatScroll);
           requestAnimationFrame(() => {
             scrollingProgrammatically = false;
           });
@@ -1447,15 +1456,14 @@
     if (payload.homeModels && payload.homeModels.length) {
       homeModels = payload.homeModels;
     }
-    // busy tylko na jednej sesji Build
-    if (detachedBuild && mode === "grok") {
-      /* nowa sesja — nie przywracaj starego Thinking */
-    } else if (payload.busySessionId !== undefined) {
-      busySessionId = payload.busySessionId || null;
-    } else if (payload.promptBusy && payload.activeSessionId) {
-      busySessionId = payload.activeSessionId;
-    } else if (payload.promptBusy === false) {
-      busySessionId = null;
+    if (Array.isArray(payload.busySessionIds)) {
+      busySessionIds.clear();
+      for (const id of payload.busySessionIds) {
+        if (id) busySessionIds.add(id);
+      }
+      busySessionId = busySessionIds.values().next().value || null;
+    } else if (payload.busySessionId) {
+      setSessionBusy(payload.busySessionId, true);
     }
     if (!selectedId) updatePathChips(mode === "home" ? "" : defaultCwd);
 
@@ -1514,13 +1522,7 @@
   /** Zapisz live stan Build sesji przed przełączeniem. */
   function snapshotCurrentBuildSession() {
     if (mode !== "grok" || !liveSessionId) return;
-    // Snapshot TYLKO sesji, którą oglądamy — i tylko jeśli to ona pracuje
-    // albo ma własny bufor (nie nadpisuj bufora pracującej A danymi z B)
     const sid = liveSessionId;
-    if (busySessionId && busySessionId !== sid) {
-      // oglądamy B, pracuje A — nie ruszaj bufora A; B bez live streamu
-      return;
-    }
     streamBySession[sid] = {
       allMessages: allMessages.slice(),
       streamingAssistant,
@@ -1552,6 +1554,7 @@
     }
     if (!pendingNewSession) return;
     if (selectedId && selectedId !== sid) return;
+    if (streamBySession[sid] && liveSessionId !== sid) return;
     selectedId = sid;
     liveSessionId = sid;
     pendingNewSession = false;
@@ -1586,13 +1589,8 @@
   }
 
   async function openSession(row, opts = {}) {
-    // Przed zmianą — odłóż stream TYLKO jeśli odchodzimy z pracującej sesji
-    if (
-      mode === "grok" &&
-      liveSessionId &&
-      liveSessionId !== row.id &&
-      busySessionId === liveSessionId
-    ) {
+    detachedBuild = false;
+    if (mode === "grok" && liveSessionId && liveSessionId !== row.id) {
       snapshotCurrentBuildSession();
     }
 
@@ -1603,9 +1601,8 @@
     updatePathChips(row.cwd);
     renderList();
 
-    // Live TYLKO gdy TA sesja jest busySessionId (agent realnie tu pracuje)
     const live = streamBySession[row.id];
-    const hasLiveWork = Boolean(live && busySessionId === row.id);
+    const hasLiveWork = Boolean(live && isSessionBusy(row.id));
 
     if (hasLiveWork) {
       const mergeLive =
@@ -1721,15 +1718,8 @@
     pushBag();
     persistNav();
 
-    // Busy globalnie (kolejka) ale UI bez „Myślę” / Working na tej sesji
-    if (busySessionId && busySessionId !== row.id && bags.grok.busy) {
-      busy = true; // kolejka działa
-      bags.grok.busy = true;
-      el.busyChip.classList.add("hidden");
-      el.btnStop.classList.remove("hidden");
-      el.btnSend.classList.add("queue-mode");
-      el.input.placeholder = tr("Agent is working in another Build session…");
-      el.statusBar.classList.add("hidden");
+    if (isSessionBusy(row.id)) {
+      setBusy(true, mode);
     } else {
       setBusy(false, mode);
       el.statusBar.classList.add("hidden");
@@ -1972,8 +1962,6 @@
   /** Stream do bufora sesji (UI jest na innej sesji / Home). */
   function applyStreamOffscreen(sid, params) {
     if (!sid) return;
-    // nie pisz do bufora obcej sesji niż busy
-    if (busySessionId && sid !== busySessionId) return;
     const buf = ensureSessionStream(sid);
     const update = params.update || params;
     const kind = update.sessionUpdate;
@@ -2069,7 +2057,7 @@
 
   function handleChatUpdate(params) {
     // NIGDY nie fallbackuj na liveSessionId/selectedId — to wlewało stream w obcą sesję
-    const sid = (params && params.sessionId) || busySessionId || null;
+    const sid = (params && params.sessionId) || null;
     if (sid && mode === "grok") adoptBuildSession(sid);
     if (!sid) {
       // nieoznaczony stream — tylko do offscreen busySession jeśli znamy
@@ -2346,21 +2334,15 @@
     const viewingBusySession =
       mode === "home"
         ? busy
-        : !busy
-          ? false
-          : !busySessionId ||
-            busySessionId === liveSessionId ||
-            busySessionId === selectedId;
-    // Composer ZAWSZE aktywny — w trakcie myślenia da się pisać i kolejkować.
+        : isSessionBusy(liveSessionId || selectedId);
+    // Composer aktywny. Kolejka tylko gdy TA sesja pisze.
     el.btnSend.disabled = false;
     el.btnSend.classList.remove("hidden");
-    el.btnSend.title = busy
-      ? viewingBusySession
-        ? tr("Add to queue (sends after the reply)")
-        : tr("Agent busy in another Build session — Enter queues the message")
+    el.btnSend.title = viewingBusySession
+      ? tr("Add to queue (sends after the reply)")
       : "Send";
-    el.btnSend.classList.toggle("queue-mode", busy);
-    el.btnStop.classList.toggle("hidden", !busy);
+    el.btnSend.classList.toggle("queue-mode", viewingBusySession);
+    el.btnStop.classList.toggle("hidden", !viewingBusySession);
     // Chip „Working” obok Auto — NIGDY; status = pasek Myślę… nad composerem
     if (el.busyChip) {
       el.busyChip.classList.add("hidden");
@@ -2368,10 +2350,9 @@
     }
     el.input.disabled = false;
     el.input.readOnly = false;
-    if (busy && viewingBusySession) {
+    if (viewingBusySession) {
       el.input.placeholder =
         tr("Keep typing — Enter adds to the queue…");
-      // trzymaj „Myślę…” widoczne przez całą pracę, nawet bez nowego setStatus
       if (el.statusBar.classList.contains("hidden")) {
         const d = bag().statusDetail;
         const p = bag().statusPhase;
@@ -2379,9 +2360,6 @@
         paintStatusText();
         el.statusBar.classList.remove("hidden");
       }
-    } else if (busy && !viewingBusySession) {
-      el.input.placeholder =
-        tr("Agent is working in another Build session…");
     } else {
       el.input.placeholder =
         tr("Message Grok… (Enter = send, ⌘V = paste screenshot)");
@@ -2621,7 +2599,7 @@
     const atts = attachments.slice();
 
     // Agent busy → osobna pozycja w kolejce (nie sklejaj z poprzednią).
-    if (busy) {
+    if (isSessionBusy(liveSessionId || selectedId) || (mode === "home" && busy)) {
       const piece = text || tr("(attachment)");
       const qid = `u-q-${Date.now()}-${messageQueue.length}`;
       messageQueue.push({ id: qid, text: piece, attachments: atts });
@@ -2787,12 +2765,15 @@
     updateQueueChip();
 
     try {
-      await withTimeout(api.chatStop({ mode }), 4000);
+      await withTimeout(
+        api.chatStop({ mode, sessionId: liveSessionId || selectedId }),
+        4000
+      );
     } catch {
       /* stop hung — send anyway */
     }
     setBusy(false);
-    busySessionId = null;
+    setSessionBusy(liveSessionId || selectedId, false);
     closeStreamingAssistant();
 
     const payload =
@@ -2931,7 +2912,7 @@
     renderActivity();
     setBusy(true);
     if (mode === "grok" && sessionId) {
-      busySessionId = sessionId;
+      setSessionBusy(sessionId, true);
       snapshotCurrentBuildSession();
     }
     setStatus("thinking", mode === "home" ? tr("Thinking…") : tr("Agent starting…"), mode, {
@@ -2969,9 +2950,7 @@
       }
       // po zakończeniu zostaw snapshot do momentu przeładowania transcriptu
     }
-    if (busySessionId === (res.sessionId || sessionId)) {
-      busySessionId = null;
-    }
+    setSessionBusy(res.sessionId || sessionId, false);
     setBusy(false);
     if (!res.ok) {
       showToast(res.error || tr("Send failed"), "error");
@@ -3130,26 +3109,15 @@
   }
 
   async function newChat() {
-    const oldSid = liveSessionId;
-    const wasBusy = Boolean(busy || busySessionId);
+    const wasBusy = Boolean(busy || isSessionBusy(liveSessionId));
     if (mode === "grok") {
+      if (liveSessionId) snapshotCurrentBuildSession();
       detachedBuild = true;
-      busySessionId = null;
       bags.grok.busy = false;
       bags.grok.statusPhase = "";
       bags.grok.statusDetail = "";
       setBusy(false, "grok");
       el.statusBar.classList.add("hidden");
-      if (oldSid) delete streamBySession[oldSid];
-      if (wasBusy) {
-        try {
-          await api.chatStop({ mode: "grok" });
-        } catch {
-          /* ignore */
-        }
-        setBusy(false, "grok");
-        busySessionId = null;
-      }
     } else if (mode === "home" && wasBusy) {
       setBusy(false, "home");
       el.statusBar.classList.add("hidden");
@@ -3367,7 +3335,10 @@
   });
   el.btnStop.onclick = async () => {
     // przekaż tryb — w Home trzeba przerwać żądanie HTTP, nie proces agenta
-    const res = await api.chatStop({ mode });
+    const res = await api.chatStop({
+      mode,
+      sessionId: liveSessionId || selectedId,
+    });
     setBusy(false);
     if (!res.ok) showToast(res.error || tr("Stop failed"), "error");
     else showToast(tr("Stopped"), "ok");
@@ -3376,7 +3347,11 @@
     const id = el.modelSelect.value;
     if (mode === "home") homeModelId = id;
     else codeModelId = id;
-    const res = await api.chatSetModel({ modelId: id, mode });
+    const res = await api.chatSetModel({
+      modelId: id,
+      mode,
+      sessionId: liveSessionId || selectedId,
+    });
     if (!res.ok) showToast(res.error || tr("Model change failed"), "error");
   });
   el.btnToggleActivity.onclick = () => {
@@ -3576,65 +3551,30 @@
   api.onUpdated(applyPayload);
   api.onChatUpdate(handleChatUpdate);
   api.onChatBusy(({ busy: b, sessionId, mode: evMode }) => {
-    // Home i Build mają teraz osobne tory — zdarzenie z jednego nie może
-    // przestawiać stanu drugiego.
     if (evMode === "home") {
       bags.home.busy = Boolean(b);
       if (mode === "home") setBusy(Boolean(b), "home");
       return;
     }
-    if (detachedBuild) {
-      if (!b) bags.grok.busy = false;
-      return;
+    if (sessionId) setSessionBusy(sessionId, b);
+    if (sessionId && b) adoptBuildSession(sessionId);
+    if (sessionId && !b) {
+      const buf = streamBySession[sessionId];
+      if (buf && buf.streamingAssistant) {
+        buf.streamingAssistant._streaming = false;
+      }
     }
-    if (b) {
-      busySessionId =
-        sessionId || busySessionId || null;
-      // nie bierz selectedId jako busy — to była dziura
-      if (!busySessionId && mode === "grok") {
-        busySessionId = liveSessionId || selectedId || null;
-      }
-      if (sessionId) adoptBuildSession(sessionId);
-      bags.grok.busy = true;
-      if (busySessionId && isViewingSession(busySessionId)) {
-        snapshotCurrentBuildSession();
-      }
-    } else {
-      if (busySessionId) {
-        const buf = streamBySession[busySessionId];
-        if (buf && buf.streamingAssistant) {
-          buf.streamingAssistant._streaming = false;
-        }
-      }
-      busySessionId = null;
-      bags.grok.busy = false;
-    }
-    const viewingWork = b && busySessionId && isViewingSession(busySessionId);
+    const viewingThis =
+      sessionId && isViewingSession(sessionId);
     if (mode === "home") {
-      bags.grok.busy = Boolean(b);
-      el.busyChip.classList.add("hidden");
-      el.statusBar.classList.add("hidden");
       renderList();
       return;
     }
-    if (viewingWork) {
-      setBusy(true, mode);
-    } else if (b) {
-      // pracuje indziej — kolejka OK, zero statusu Myślę
-      busy = true;
-      bags.grok.busy = true;
-      el.busyChip.classList.add("hidden");
-      el.btnStop.classList.remove("hidden");
-      el.btnSend.classList.add("queue-mode");
-      el.input.placeholder = tr("Agent is working in another Build session…");
-      el.statusBar.classList.add("hidden");
-      el.statusText.textContent = "";
-      liveTools = [];
-    livePlan = [];
-      renderActivity();
-    } else {
-      setBusy(false, mode);
-      el.statusBar.classList.add("hidden");
+    if (viewingThis) {
+      setBusy(Boolean(b), mode);
+      if (b) snapshotCurrentBuildSession();
+    } else if (!sessionId && isViewingSession(liveSessionId || selectedId)) {
+      setBusy(Boolean(b), mode);
     }
     renderList();
   });
@@ -3659,17 +3599,7 @@
     if (mode === "grok") refresh();
   });
   api.onChatStatus(({ phase, detail, sessionId }) => {
-    const sid = sessionId || busySessionId || null;
-    // zero statusu na obcej sesji
-    if (mode === "grok" && busySessionId && selectedId !== busySessionId) {
-      const buf = ensureSessionStream(busySessionId);
-      if (buf) {
-        buf.statusPhase = phase;
-        buf.statusDetail = detail || "";
-      }
-      el.statusBar.classList.add("hidden");
-      return;
-    }
+    const sid = sessionId || null;
     if (sid && mode === "grok" && !isViewingSession(sid)) {
       const buf = ensureSessionStream(sid);
       if (buf) {

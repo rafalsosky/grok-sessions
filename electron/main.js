@@ -17,6 +17,7 @@ const { loadSettings, saveSettings } = require("./settings");
 const { loadTranscript } = require("./transcript");
 const { loadAccount } = require("./account");
 const { AcpClient } = require("./acp-client");
+const { createAgentPool } = require("./agent-pool");
 const homeChats = require("./home-chats");
 const xai = require("./xai-api");
 const modelsLib = require("./models");
@@ -36,13 +37,13 @@ const execFileAsync = promisify(execFile);
 let mainWindow = null;
 let watchers = [];
 let pollTimer = null;
-/** @type {AcpClient|null} */
-let acp = null;
+/** Jeden proces grok na sesję Build. Nie współdziel. */
+const pool = createAgentPool();
 /**
  * Osobne flagi: Home to HTTP do api.x.ai, Build to proces agenta.
- * Wcześniej jedna wspólna flaga blokowała Home na czas pracy agenta.
+ * Build nie ma już jednej globalnej flagi — busy siedzi w puli per sesja.
  */
-const promptBusy = { home: false, grok: false };
+const promptBusy = { home: false };
 /** Przerwanie żądania Home (Stop działa też poza trybem Build). */
 let homeAbort = null;
 /** Oczekujące prośby agenta o zgodę na narzędzie: id → sessionId */
@@ -66,15 +67,22 @@ function effectiveHomeModelId(settings, modelId) {
   });
 }
 
+function firstLiveClient() {
+  return pool.all().find((c) => c && c.ready) || pool.all()[0] || null;
+}
+
+function liveBuildModels() {
+  const client = firstLiveClient();
+  return client && client.models && client.models.length
+    ? client.models
+    : modelsLib.FALLBACK_BUILD_MODELS;
+}
+
 function effectiveBuildModelId(settings) {
-  const live =
-    acp && acp.models && acp.models.length
-      ? acp.models
-      : modelsLib.FALLBACK_BUILD_MODELS;
   return modelsLib.resolveChatModelId({
     alwaysLatest: settings.alwaysLatestModel,
     savedId: settings.modelId,
-    models: live,
+    models: liveBuildModels(),
   });
 }
 
@@ -105,13 +113,11 @@ function pinLatestAfterManualPick(modelId, mode) {
   if (!modelsLib.isPublicChatModel(modelId)) {
     return { alwaysLatestModel: settings.alwaysLatestModel };
   }
-  const pool =
+  const modelPool =
     mode === "home"
       ? homeModelsLive
-      : acp && acp.models && acp.models.length
-        ? acp.models
-        : modelsLib.FALLBACK_BUILD_MODELS;
-  const highest = modelsLib.highestChatModelId(pool);
+      : liveBuildModels();
+  const highest = modelsLib.highestChatModelId(modelPool);
   if (modelId === highest) return { alwaysLatestModel: settings.alwaysLatestModel };
   return { alwaysLatestModel: false };
 }
@@ -245,17 +251,13 @@ function buildListPayload() {
     grokBinary: bin,
     authOk: authPresent(result.grokHome),
     account,
-    models: acp
-      ? {
-          currentModelId: settings.alwaysLatestModel
-            ? effectiveBuildModelId(settings)
-            : acp.currentModelId,
-          availableModels: acp.models,
-        }
-      : {
-          currentModelId: effectiveBuildModelId(settings),
-          availableModels: modelsLib.FALLBACK_BUILD_MODELS,
-        },
+    models: {
+      currentModelId: settings.alwaysLatestModel
+        ? effectiveBuildModelId(settings)
+        : (firstLiveClient() && firstLiveClient().currentModelId) ||
+          effectiveBuildModelId(settings),
+      availableModels: liveBuildModels(),
+    },
     homeModels: homeModelsLive,
     settings: {
       grokPath: settings.grokPath,
@@ -282,12 +284,12 @@ function buildListPayload() {
       // do maskowania ścieżek w trybie prywatności (/Users/ktoś → ~)
       homeDir: app.getPath("home"),
     },
-    agentReady: Boolean(acp && acp.ready),
-    promptBusy: promptBusy.grok,
+    agentReady: pool.all().some((c) => c && c.ready),
+    promptBusy: pool.anyBusy(),
     homeBusy: promptBusy.home,
-    /** Tylko ta sesja Build ma „pracuje” — nie cała lista */
-    activeSessionId: acp ? acp.sessionId : null,
-    busySessionId: promptBusy.grok && acp && acp.sessionId ? acp.sessionId : null,
+    activeSessionId: pool.busyIds()[0] || null,
+    busySessionId: pool.busyIds()[0] || null,
+    busySessionIds: pool.busyIds(),
   };
 }
 
@@ -302,6 +304,7 @@ function pushSessions(force = false) {
   const sig = JSON.stringify([
     payload.rows.map((r) => [r.id, r.title, r.lastActiveAt, r.isActive, r.numMessages]),
     payload.homeRows.map((r) => [r.id, r.title, r.updatedAt, r.numMessages]),
+    payload.busySessionIds,
     payload.busySessionId,
     payload.promptBusy,
     payload.homeBusy,
@@ -364,78 +367,105 @@ function startWatchers() {
   }, pollMs);
 }
 
-async function ensureAcp() {
+function wireClient(client) {
+  client.on("permission", ({ id, params }) => {
+    const sid =
+      (params && (params.sessionId || params.session_id)) ||
+      client.sessionId ||
+      pool.findByClient(client);
+    pendingPermissions.set(id, sid);
+    send("chat:permission", {
+      id,
+      sessionId: sid,
+      toolCall: (params && params.toolCall) || null,
+      options: (params && params.options) || [],
+    });
+  });
+  client.on("update", (params) => {
+    const sid =
+      (params && (params.sessionId || params.session_id)) ||
+      client.sessionId ||
+      pool.findByClient(client) ||
+      null;
+    send("chat:update", Object.assign({}, params, { sessionId: sid }));
+  });
+  client.on("error", (err) => {
+    send("chat:error", {
+      message: err.message,
+      sessionId: client.sessionId || pool.findByClient(client),
+    });
+  });
+  client.on("exit", (code) => {
+    const sid = client.sessionId || pool.findByClient(client);
+    if (sid) {
+      pool.forget(sid);
+      pool.markBusy(sid, false);
+    }
+    send("chat:agent-exit", { code, sessionId: sid });
+    send("chat:busy", { busy: false, sessionId: sid, mode: "grok" });
+    pushSessions();
+  });
+  client.on("models", async (m) => {
+    send("chat:models", m);
+    const settings = getSettings();
+    const sid = client.sessionId || pool.findByClient(client);
+    if (!settings.alwaysLatestModel || (sid && pool.isBusy(sid))) {
+      pushSessions();
+      return;
+    }
+    const high = modelsLib.highestChatModelId(
+      m.availableModels || client.models
+    );
+    if (high && client.currentModelId !== high && !client._switchingLatest) {
+      client._switchingLatest = true;
+      try {
+        await client.setModel(high);
+      } catch {
+        /* lista i tak poleci do UI */
+      } finally {
+        client._switchingLatest = false;
+      }
+    }
+    pushSessions();
+  });
+}
+
+async function spawnClient() {
   const settings = getSettings();
   const bin = checkGrokBinary(settings.grokPath);
   if (!bin.ok) throw new Error(bin.reason || "grok binary not found");
-
-  if (!acp) {
-    acp = new AcpClient({
-      grokPath: settings.grokPath,
-      model: effectiveBuildModelId(settings),
-      // "ask" = agent pyta o narzędzia; wcześniej było zawsze true
-      alwaysApprove: settings.permissionMode !== "ask",
-      reasoningEffort: settings.effort || "high",
-    });
-    acp.on("permission", ({ id, params }) => {
-      const sid = (params && (params.sessionId || params.session_id)) || null;
-      pendingPermissions.set(id, sid);
-      send("chat:permission", {
-        id,
-        sessionId: sid,
-        toolCall: (params && params.toolCall) || null,
-        options: (params && params.options) || [],
-      });
-    });
-    acp.on("update", (params) => {
-      // Zawsze taguj sesją ACP — UI nie może pisać do „aktualnie otwartej”
-      const sid =
-        (params && (params.sessionId || params.session_id)) ||
-        acp.sessionId ||
-        null;
-      send("chat:update", Object.assign({}, params, { sessionId: sid }));
-    });
-    acp.on("error", (err) => {
-      send("chat:error", {
-        message: err.message,
-        sessionId: acp ? acp.sessionId : null,
-      });
-    });
-    acp.on("exit", (code) => {
-      send("chat:agent-exit", { code });
-      pushSessions();
-    });
-    acp.on("models", async (m) => {
-      send("chat:models", m);
-      const settings = getSettings();
-      if (!settings.alwaysLatestModel || promptBusy.grok) {
-        pushSessions();
-        return;
-      }
-      const high = modelsLib.highestChatModelId(m.availableModels || acp.models);
-      if (high && acp.currentModelId !== high && !acp._switchingLatest) {
-        acp._switchingLatest = true;
-        try {
-          await acp.setModel(high);
-        } catch {
-          /* lista i tak poleci do UI */
-        } finally {
-          acp._switchingLatest = false;
-        }
-      }
-      pushSessions();
-    });
-  }
-  await acp.start();
-  return acp;
+  const client = new AcpClient({
+    grokPath: settings.grokPath,
+    model: effectiveBuildModelId(settings),
+    alwaysApprove: settings.permissionMode !== "ask",
+    reasoningEffort: settings.effort || "high",
+  });
+  wireClient(client);
+  await client.start();
+  return client;
 }
 
-function status(phase, detail) {
+/**
+ * Klient TYLKO dla tej sesji. Nigdy session/load na procesie innej karty.
+ */
+async function clientForSession(sessionId, cwd) {
+  if (sessionId && pool.has(sessionId)) {
+    return pool.get(sessionId);
+  }
+  const client = await spawnClient();
+  if (sessionId) {
+    await client.ensureSession({ sessionId, cwd });
+    pool.put(sessionId, client);
+  }
+  return client;
+}
+
+function status(phase, detail, sessionId) {
   send("chat:status", {
     phase,
     detail: detail || "",
     at: Date.now(),
-    sessionId: acp ? acp.sessionId : null,
+    sessionId: sessionId || null,
   });
 }
 
@@ -675,29 +705,31 @@ async function sendHomeChat({
 }
 
 async function sendCodeChat({ text, sessionId, cwd, attachments }) {
-  status("starting", "Starting agent…");
-  const client = await ensureAcp();
   const settings = getSettings();
   const workCwd = expandHome(cwd || settings.defaultCwd);
+  let sid = sessionId || null;
+  status("starting", "Starting agent…", sid);
 
-  let sid = sessionId;
-  if (!sid) {
-    status("session", "New Build session…");
-    client.sessionId = null;
-    const created = await client.ensureSession({ cwd: workCwd });
-    sid = created.sessionId;
+  let client;
+  if (sid && pool.has(sid)) {
+    client = pool.get(sid);
   } else {
-    status("session", "Loading session…");
-    await client.ensureSession({ sessionId: sid, cwd: workCwd });
+    client = await spawnClient();
+    if (sid) {
+      status("session", "Loading session…", sid);
+      await client.ensureSession({ sessionId: sid, cwd: workCwd });
+      pool.put(sid, client);
+    } else {
+      status("session", "New Build session…", null);
+      const created = await client.ensureSession({ cwd: workCwd });
+      sid = created.sessionId;
+      pool.put(sid, client);
+    }
   }
 
   const promptText = String(text || "") + formatAttachmentsForPrompt(attachments);
 
-  // NIE wysyłaj user_message_chunk do UI — renderer już dodał bańkę lokalnie.
-  // Echo stąd + echo z ACP = podwójna wiadomość i skok scrolla.
-
-  status("thinking", "Agent is working…");
-  // Do agenta: tekst + ścieżki załączników
+  status("thinking", "Agent is working…", sid);
   const result = await client.prompt(promptText, {
     sessionId: sid,
     cwd: workCwd,
@@ -763,26 +795,33 @@ function registerIpc() {
   ipcMain.handle("settings:set", async (_e, partial) => {
     const before = getSettings();
     const next = saveSettings(userDataDir(), partial || {});
-    if (partial && partial.modelId && acp) {
-      try {
-        await acp.setModel(partial.modelId);
-      } catch (err) {
-        send("chat:error", { message: err.message });
+    if (partial && partial.modelId) {
+      for (const client of pool.all()) {
+        const sid = client.sessionId || pool.findByClient(client);
+        if (sid && pool.isBusy(sid)) continue;
+        try {
+          await client.setModel(partial.modelId);
+        } catch (err) {
+          send("chat:error", { message: err.message, sessionId: sid });
+        }
       }
     }
-    // Tryb uprawnień to flaga CLI — wymaga restartu procesu agenta
+    // Tryb uprawnień to flaga CLI — restart TYLKO bezczynnych procesów
     if (
       partial &&
       partial.permissionMode &&
-      partial.permissionMode !== before.permissionMode &&
-      acp
+      partial.permissionMode !== before.permissionMode
     ) {
-      try {
-        await acp.setPermissionMode(partial.permissionMode, {
-          cwd: next.defaultCwd,
-        });
-      } catch (err) {
-        send("chat:error", { message: err.message });
+      for (const client of pool.all()) {
+        const sid = client.sessionId || pool.findByClient(client);
+        if (sid && pool.isBusy(sid)) continue;
+        try {
+          await client.setPermissionMode(partial.permissionMode, {
+            cwd: next.defaultCwd,
+          });
+        } catch (err) {
+          send("chat:error", { message: err.message, sessionId: sid });
+        }
       }
     }
     if (
@@ -798,11 +837,16 @@ function registerIpc() {
       if (Object.keys(patch).length) {
         saveSettings(userDataDir(), patch);
       }
-      if (acp && highBuild && acp.currentModelId !== highBuild) {
-        try {
-          await acp.setModel(highBuild);
-        } catch (err) {
-          send("chat:error", { message: err.message });
+      if (highBuild) {
+        for (const client of pool.all()) {
+          const sid = client.sessionId || pool.findByClient(client);
+          if (sid && pool.isBusy(sid)) continue;
+          if (client.currentModelId === highBuild) continue;
+          try {
+            await client.setModel(highBuild);
+          } catch (err) {
+            send("chat:error", { message: err.message, sessionId: sid });
+          }
         }
       }
     }
@@ -863,16 +907,13 @@ function registerIpc() {
     if (!UUID_RE.test(id || "")) {
       return { ok: false, error: "Bad session id" };
     }
-    try {
-      const client = await ensureAcp();
-      await client.ensureSession({
-        sessionId: id,
-        cwd: expandHome(cwd || getSettings().defaultCwd),
-      });
-      return { ok: true, sessionId: id, mode: "grok" };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
+    // Otwarcie karty NIE ładuje sesji na procesie innej karty.
+    return {
+      ok: true,
+      sessionId: id,
+      mode: "grok",
+      attached: pool.has(id),
+    };
   });
 
   ipcMain.handle("chat:send", async (_e, payload) => {
@@ -893,23 +934,24 @@ function registerIpc() {
       return { ok: false, error: "Empty message" };
     }
     const lane = mode === "home" ? "home" : "grok";
-    if (promptBusy[lane]) {
-      return {
-        ok: false,
-        error:
-          lane === "home" ? "Home is still answering" : "Agent is still working",
-      };
+    if (lane === "home" && promptBusy.home) {
+      return { ok: false, error: "Home is still answering" };
+    }
+    if (lane === "grok" && sessionId && pool.isBusy(sessionId)) {
+      return { ok: false, error: "This session is still working" };
     }
 
-    promptBusy[lane] = true;
+    let outSid = sessionId || null;
+    if (lane === "home") promptBusy.home = true;
+    if (lane === "grok" && outSid) pool.markBusy(outSid, true);
     send("chat:busy", {
       busy: true,
-      sessionId: sessionId || null,
+      sessionId: outSid,
       mode: mode || "home",
     });
-    status("queued", "Starting…");
+    status("queued", "Starting…", outSid);
+    let out;
     try {
-      let out;
       if (mode === "home") {
         out = await sendHomeChat({
           text: hasText ? String(text) : "(attachment)",
@@ -920,44 +962,47 @@ function registerIpc() {
           aspectRatio,
         });
       } else {
-        if (effort && acp && acp.reasoningEffort !== effort) {
-          saveSettings(userDataDir(), { effort });
-          await acp.setEffort(effort, { cwd });
-        } else if (effort) {
-          saveSettings(userDataDir(), { effort });
-        }
+        if (effort) saveSettings(userDataDir(), { effort });
         out = await sendCodeChat({
           text: hasText ? String(text) : "Analyze the attachments.",
           sessionId,
           cwd,
           attachments: attachments || [],
         });
-        // po starcie sesji ACP znamy finalne ID
         if (out && out.sessionId) {
+          outSid = out.sessionId;
+          pool.markBusy(outSid, true);
           send("chat:busy", {
             busy: true,
-            sessionId: out.sessionId,
+            sessionId: outSid,
             mode: "grok",
           });
         }
       }
       pushSessions();
-      status("done", "Done");
+      status("done", "Done", outSid);
       return out;
     } catch (err) {
-      status("error", err.message);
+      status("error", err.message, outSid);
       return { ok: false, error: err.message };
     } finally {
-      promptBusy[lane] = false;
-      if (lane === "home") homeAbort = null;
-      send("chat:busy", { busy: false, sessionId: null, mode: lane });
+      if (lane === "home") {
+        promptBusy.home = false;
+        homeAbort = null;
+      } else if (outSid) {
+        pool.markBusy(outSid, false);
+      }
+      send("chat:busy", { busy: false, sessionId: outSid, mode: lane });
     }
   });
 
   ipcMain.handle("chat:permission-reply", async (_e, payload) => {
     const { id, optionId } = payload || {};
-    if (id == null || !acp) return { ok: false, error: "No agent" };
-    const ok = acp.respondPermission(id, optionId || null);
+    if (id == null) return { ok: false, error: "No agent" };
+    const sid = pendingPermissions.get(id);
+    const client = (sid && pool.get(sid)) || pool.all()[0];
+    if (!client) return { ok: false, error: "No agent" };
+    const ok = client.respondPermission(id, optionId || null);
     pendingPermissions.delete(id);
     return { ok };
   });
@@ -969,8 +1014,13 @@ function registerIpc() {
       ? effort
       : "high";
     saveSettings(userDataDir(), { effort: level });
+    const sid =
+      typeof payload === "object" && payload ? payload.sessionId : null;
     try {
-      if (acp) await acp.setEffort(level, { cwd });
+      const client = sid ? pool.get(sid) : null;
+      if (client && !pool.isBusy(sid)) {
+        await client.setEffort(level, { cwd });
+      }
       return { ok: true, effort: level };
     } catch (err) {
       return { ok: false, error: err.message };
@@ -984,8 +1034,10 @@ function registerIpc() {
     const mode = typeof payload === "object" && payload ? payload.mode : "grok";
     if (!modelId) return { ok: false, error: "No model" };
 
-    if (mode !== "home" && promptBusy.grok) {
-      return { ok: false, error: "Agent is still working" };
+    const sid =
+      typeof payload === "object" && payload ? payload.sessionId : null;
+    if (mode !== "home" && sid && pool.isBusy(sid)) {
+      return { ok: false, error: "This session is still working" };
     }
     const pin = pinLatestAfterManualPick(modelId, mode);
     if (mode === "home") {
@@ -995,10 +1047,14 @@ function registerIpc() {
     }
     saveSettings(userDataDir(), { modelId, ...pin });
     try {
-      const client = await ensureAcp();
-      const res = await client.setModel(modelId);
+      const client = sid ? pool.get(sid) : null;
+      if (client && !pool.isBusy(sid)) {
+        const res = await client.setModel(modelId);
+        pushSessions();
+        return { ok: true, mode: "grok", ...res };
+      }
       pushSessions();
-      return { ok: true, mode: "grok", ...res };
+      return { ok: true, mode: "grok", deferred: true };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -1006,36 +1062,32 @@ function registerIpc() {
 
   ipcMain.handle("chat:stop", async (_e, payload) => {
     const mode = (payload && payload.mode) || null;
+    const sessionId = (payload && payload.sessionId) || null;
 
     // Home: przerwij żądanie HTTP. Wcześniej Stop nic tu nie robił, więc
     // odpowiedź i tak dochodziła i dopisywała się do czatu.
-    if (mode === "home" || (!mode && promptBusy.home)) {
+    if (mode === "home") {
       const had = Boolean(homeAbort);
       if (homeAbort) homeAbort.abort();
       homeAbort = null;
       promptBusy.home = false;
-      send("chat:busy", { busy: false, mode: "home" });
-      status("stopped", "Stopped");
-      if (mode === "home") return { ok: true, stopped: had, mode: "home" };
+      send("chat:busy", { busy: false, mode: "home", sessionId });
+      status("stopped", "Stopped", sessionId);
+      return { ok: true, stopped: had, mode: "home" };
     }
 
     try {
-      if (!acp) {
-        promptBusy.grok = false;
-        send("chat:busy", { busy: false, mode: "grok" });
-        return { ok: true, stopped: false };
+      if (!sessionId) {
+        return { ok: false, error: "No sessionId — refusing to kill other sessions" };
       }
-      const sid = acp.sessionId;
-      await acp.stop();
-      acp = null;
-      promptBusy.grok = false;
-      send("chat:busy", { busy: false, mode: "grok" });
-      status("stopped", "Stopped");
-      ensureAcp().catch(() => {});
-      return { ok: true, stopped: true, sessionId: sid };
+      const stopped = await pool.stop(sessionId);
+      send("chat:busy", { busy: false, mode: "grok", sessionId });
+      status("stopped", "Stopped", sessionId);
+      pushSessions();
+      return { ok: true, stopped, sessionId };
     } catch (err) {
-      promptBusy.grok = false;
-      send("chat:busy", { busy: false, mode: "grok" });
+      if (sessionId) pool.markBusy(sessionId, false);
+      send("chat:busy", { busy: false, mode: "grok", sessionId });
       return { ok: false, error: err.message };
     }
   });
@@ -1092,7 +1144,7 @@ function registerIpc() {
         ["sessions", "delete", id],
         { timeout: 30000 }
       );
-      if (acp && acp.sessionId === id) acp.sessionId = null;
+      if (pool.has(id)) await pool.stop(id);
       pushSessions();
       return {
         ok: true,
@@ -1259,9 +1311,6 @@ if (!gotLock) {
     startWatchers();
     setTimeout(pushSessions, 200);
     refreshHomeModels().catch(() => {});
-    ensureAcp().catch((err) => {
-      send("chat:error", { message: `Agent: ${err.message}` });
-    });
 
     app.on("activate", () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -1275,11 +1324,11 @@ if (!gotLock) {
 
 app.on("window-all-closed", async () => {
   clearWatchers();
-  if (acp) await acp.stop();
+  await pool.stopAll();
   if (process.platform !== "darwin") app.quit();
 });
 
 app.on("before-quit", async () => {
   clearWatchers();
-  if (acp) await acp.stop();
+  await pool.stopAll();
 });
