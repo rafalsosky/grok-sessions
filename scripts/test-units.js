@@ -497,9 +497,19 @@ group("build: New session odłącza bieżącą turę");
       !/chatStop\(\{\s*mode:\s*"grok"/.test(fn[0]),
       "New session nadal zabija agenta pierwszej sesji"
     );
+    // Po przebudowie stan sesji NIE jest kopiowany: nowy czat bierze swiezy
+    // rekord "tryb:new", a rekord pracujacej sesji zostaje w store nietkniety.
     assert.ok(
-      /snapshotCurrentBuildSession/.test(fn[0]),
-      "New session kasuje bufor pracującej sesji zamiast go odłożyć"
+      /store\.delete\(keyOf\(mode, null\)\)/.test(fn[0]),
+      "newChat nie bierze swiezego rekordu"
+    );
+    assert.ok(
+      /setActive\(mode, null\)/.test(fn[0]),
+      "newChat nie przestawia wskaznika na nowy rekord"
+    );
+    assert.ok(
+      !/cur\.allMessages = \[\]/.test(fn[0]),
+      "newChat nadal zeruje pola recznie zamiast wziac nowy rekord"
     );
   });
 
@@ -798,7 +808,7 @@ group("chat-history: dół sesji i merge po transkrypcie");
       "ACP turn_completed jest ignorowane — nowa tura sklei się ze starą"
     );
     assert.ok(
-      /after !== streamingAssistant/.test(app),
+      /after !== cur\.streamingAssistant/.test(app),
       "ensureStreamingAssistant nie odpuszcza starej bańki po wiadomości usera"
     );
     assert.ok(
@@ -859,7 +869,7 @@ group("chat-history: dół sesji i merge po transkrypcie");
     assert.ok(/pendingNewSession/.test(app), "brak pendingNewSession");
     assert.ok(/function adoptBuildSession/.test(app), "brak adoptBuildSession");
     assert.ok(
-      /awaitingOwnNewSession\(\) && !selectedId/.test(app),
+      /awaitingOwnNewSession\(\) && !cur\.selectedId/.test(app),
       "isViewingSession nie trzyma nowej sesji"
     );
     assert.ok(
@@ -1131,6 +1141,54 @@ group("chat-scroll: user na górze zostaje na górze");
    przestawiał selectedId/liveSessionId, gasił busy i domykał bańkę na tym,
    co akurat było otwarte. Koniec tury A robił to sesji B: ten sam tekst
    w dwóch kartach, „working” na obu, wiadomość usera lądująca w środku. */
+/* ── 7f. Jedno zrodlo prawdy dla stanu sesji ──────────────────────────
+   Do 17.08 stan lezal w TRZECH kopiach (zmienne modulu, bags.*,
+   streamBySession) synchronizowanych recznie. Cztery osobne bledy tego dnia
+   byly wprost ta dwoistoscia. Te testy pilnuja, ze kopia jest JEDNA. */
+group("stan sesji: jedna mapa, zero recznej synchronizacji");
+{
+  const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+  test("nie ma juz drugiej ani trzeciej kopii stanu", () => {
+    assert.ok(!/const bags = \{/.test(app), "bags wrocilo jako druga kopia");
+    assert.ok(!/function emptyBag/.test(app), "emptyBag wrocil");
+    assert.ok(
+      !/function snapshotCurrentBuildSession\(\)/.test(app),
+      "wrocil reczny zrzut stanu miedzy kopiami"
+    );
+    assert.ok(!/function stampSessionId/.test(app), "wrocilo stemplowanie _sid");
+  });
+  test("jest jedna mapa rekordow z kluczem tryb:sid", () => {
+    assert.ok(/const store = new Map\(\)/.test(app), "brak magazynu");
+    assert.ok(/function keyOf\(m, sid\)/.test(app), "brak klucza tryb:sid");
+    assert.ok(/function recordFor\(m, sid\)/.test(app), "brak dostepu po kluczu");
+    assert.ok(/let cur = recordFor\(/.test(app), "brak wskaznika na aktywny rekord");
+  });
+  test("przelaczenie sesji to podmiana wskaznika, nie kopiowanie pol", () => {
+    const fn = app.match(/async function openSession\([\s\S]*?\n  \}\n/);
+    assert.ok(fn, "brak openSession");
+    assert.ok(/setActive\(mode, row\.id\)/.test(fn[0]), "openSession nie przestawia wskaznika");
+    assert.ok(
+      !/cur\.selectedId = row\.id/.test(fn[0]),
+      "openSession nadal przepisuje pola recznie"
+    );
+  });
+  test("streamBySession czyta TEN SAM rekord co store", () => {
+    assert.ok(
+      /const streamBySession = new Proxy\(/.test(app),
+      "streamBySession znowu jest osobnym obiektem"
+    );
+    assert.ok(
+      /store\.get\(keyOf\("grok", sid\)\)/.test(app),
+      "proxy nie siega do store"
+    );
+  });
+  test("nowa sesja dostaje klucz przez przepiecie rekordu", () => {
+    assert.ok(/function rekeyNewSession/.test(app), "brak przepiecia rekordu");
+    const fn = app.match(/function adoptBuildSession[\s\S]*?\n  \}\n/);
+    assert.ok(/rekeyNewSession\("grok", sid\)/.test(fn[0]), "adopcja nie przepina rekordu");
+  });
+}
+
 group("send: koniec tury A nie rusza widoku sesji B");
 {
   const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
@@ -1138,7 +1196,7 @@ group("send: koniec tury A nie rusza widoku sesji B");
   test("runSendTurn trzyma własną bańkę tury", () => {
     assert.ok(fn, "brak runSendTurn");
     assert.ok(
-      /const turnAssistant = streamingAssistant/.test(fn[0]),
+      /const turnAssistant = cur\.streamingAssistant/.test(fn[0]),
       "tura nie zapamiętuje swojej bańki — po await zamknie cudzą"
     );
   });
@@ -1156,8 +1214,15 @@ group("send: koniec tury A nie rusza widoku sesji B");
     );
   });
   test("selectedId i liveSessionId nie rozjeżdżają się po turze", () => {
-    const set = fn[0].match(/liveSessionId = res\.sessionId;\s*\n\s*selectedId = res\.sessionId;/);
-    assert.ok(set, "id sesji ustawiane osobno — dwie karty na liście jako 'selected'");
+    // Nie da sie ich juz rozjechac: oba pola ustawia JEDEN ruch na rekordzie.
+    assert.ok(
+      /rekeyNewSession\(mode, res\.sessionId\)/.test(fn[0]),
+      "tura nie przepina rekordu pod prawdziwy klucz"
+    );
+    assert.ok(
+      !/cur\.selectedId = res\.sessionId/.test(fn[0]),
+      "id sesji nadal ustawiane osobno — dwie karty na liscie jako 'selected'"
+    );
   });
   test("gest użytkownika zdejmuje trzymanie dołu od razu", () => {
     assert.ok(

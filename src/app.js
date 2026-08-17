@@ -59,18 +59,36 @@
   /** { [sessionId]: { unread, pinned } } */
   let sessionFlagMap = {};
   /**
-   * Live stream per Build session — gdy user przełącza listę, stream NIE trafia do innej sesji.
-   * { [sessionId]: { allMessages, streamingAssistant, liveTools, messageQueue, statusPhase, statusDetail } }
+   * JEDNO ŹRÓDŁO PRAWDY.
+   *
+   * Do 17.08 stan sesji leżał w TRZECH kopiach naraz: w zmiennych modułu,
+   * w `bags.home` / `bags.grok` i w `streamBySession[sid]`. Synchronizowały
+   * je ręcznie pullBag/pushBag (przy zmianie trybu) i 14 wywołań
+   * snapshotCurrentBuildSession (przy zmianie sesji). Każdy zapis do złej
+   * kopii albo kopia, która się zestarzała, dawał ten sam objaw: cudza bańka
+   * w moim czacie.
+   *
+   * Teraz jest jedna mapa `store` — klucz "tryb:sid" — i wskaźnik `cur` na
+   * rekord, który akurat widać. Przełączenie sesji to podmiana wskaźnika,
+   * nie kopiowanie pól. Nie ma czego zgubić ani zapisać pod złym kluczem.
    */
-  const streamBySession = Object.create(null);
+  const NOWY = "new";
+  const store = new Map();
+  /** Sesja aktualnie otwarta w danym trybie. */
+  const activeSid = { home: null, grok: null };
 
-  /** Osobny stan UI dla Home i Code — zero mieszania. */
-  function emptyBag() {
+  function keyOf(m, sid) {
+    return `${m}:${sid || NOWY}`;
+  }
+
+  function emptyRecord(m, sid) {
     return {
-      selectedId: null,
-      liveSessionId: null,
+      mode: m,
+      sid: sid || null,
+      selectedId: sid || null,
+      liveSessionId: sid || null,
       allMessages: [],
-      messages: [],
+      widoczne: [],
       streamingAssistant: null,
       liveTools: [],
       livePlan: [],
@@ -85,63 +103,82 @@
       statusDetail: "",
     };
   }
-  const bags = { home: emptyBag(), grok: emptyBag() };
+
+  function recordFor(m, sid) {
+    const k = keyOf(m, sid);
+    let r = store.get(k);
+    if (!r) {
+      r = emptyRecord(m, sid);
+      store.set(k, r);
+    }
+    return r;
+  }
+
+  /** Rekord widoczny w danym trybie (domyślnie w bieżącym). */
   function bag(m) {
-    return bags[m || mode];
+    const t = m || mode;
+    return recordFor(t, activeSid[t]);
   }
 
-  // Lokalne aliasy aktywnego worka — pullBag/pushBag przy switchu
-  let selectedId = null;
-  let liveSessionId = null;
-  let allMessages = [];
-  let messages = [];
-  let streamingAssistant = null;
-  let liveTools = [];
-  let livePlan = [];
-  let attachments = [];
-  let messageQueue = [];
-  let busy = false;
-  let visibleCount = PAGE;
-  let showActivity = false;
+  let cur = recordFor("home", null);
 
+  /** Ustaw, co jest otwarte w tym trybie. Jedna linia zamiast 14 snapshotów. */
+  function setActive(m, sid) {
+    activeSid[m] = sid || null;
+    if (m === mode) cur = recordFor(m, sid);
+    return recordFor(m, sid);
+  }
+
+  /**
+   * Nowy czat dostaje sid dopiero w trakcie tury. Przepinamy rekord
+   * "grok:new" pod prawdziwy klucz — bez stemplowania wiadomości i bez
+   * pola _sid, bo wiadomość z definicji leży w tablicy SWOJEJ sesji.
+   */
+  function rekeyNewSession(m, sid) {
+    if (!sid) return null;
+    const zNowej = store.get(keyOf(m, null));
+    if (zNowej) {
+      zNowej.sid = sid;
+      zNowej.selectedId = sid;
+      zNowej.liveSessionId = sid;
+      store.set(keyOf(m, sid), zNowej);
+      store.delete(keyOf(m, null));
+    }
+    return setActive(m, sid);
+  }
+
+  /**
+   * Zgodność z kodem, który pisze `streamBySession[sid]` — to ten SAM rekord
+   * co w store, nie druga kopia.
+   */
+  const streamBySession = new Proxy(Object.create(null), {
+    get: (_t, sid) =>
+      typeof sid === "string" ? store.get(keyOf("grok", sid)) : undefined,
+    set: (_t, sid, val) => {
+      if (typeof sid === "string") store.set(keyOf("grok", sid), val);
+      return true;
+    },
+    has: (_t, sid) => typeof sid === "string" && store.has(keyOf("grok", sid)),
+    deleteProperty: (_t, sid) => store.delete(keyOf("grok", sid)),
+  });
+
+  function ensureSessionStream(sid) {
+    return sid ? recordFor("grok", sid) : null;
+  }
+
+  /** Zostały po starym modelu — dziś tylko tytuł okna wraca do rekordu. */
   function pullBag() {
-    const b = bag();
-    selectedId = b.selectedId;
-    liveSessionId = b.liveSessionId;
-    allMessages = b.allMessages;
-    messages = b.messages;
-    streamingAssistant = b.streamingAssistant;
-    liveTools = b.liveTools;
-    livePlan = b.livePlan || [];
-    attachments = b.attachments;
-    messageQueue = b.messageQueue;
-    busy = b.busy;
-    visibleCount = b.visibleCount;
-    showActivity = b.showActivity;
+    cur = bag();
   }
-
   function pushBag() {
-    const b = bag();
-    b.selectedId = selectedId;
-    b.liveSessionId = liveSessionId;
-    b.allMessages = allMessages;
-    b.messages = messages;
-    b.streamingAssistant = streamingAssistant;
-    b.liveTools = liveTools;
-    b.livePlan = livePlan;
-    b.attachments = attachments;
-    b.messageQueue = messageQueue;
-    b.busy = busy;
-    b.visibleCount = visibleCount;
-    b.showActivity = showActivity;
-    b.wsTitle = el.wsTitle ? el.wsTitle.textContent : b.wsTitle;
+    if (el.wsTitle) cur.wsTitle = el.wsTitle.textContent;
   }
 
   function persistNav() {
     const payload = {
       lastMode: mode,
-      lastHomeSessionId: bags.home.liveSessionId || bags.home.selectedId || "",
-      lastCodeSessionId: bags.grok.liveSessionId || bags.grok.selectedId || "",
+      lastHomeSessionId: activeSid.home || "",
+      lastCodeSessionId: activeSid.grok || "",
     };
     api.setNav(payload).catch(() => {});
   }
@@ -199,7 +236,7 @@
   }
 
   function selectedRow() {
-    return rowsForMode().find((r) => r.id === selectedId) || null;
+    return rowsForMode().find((r) => r.id === cur.selectedId) || null;
   }
 
   function basenameCwd(cwd) {
@@ -294,12 +331,12 @@
   function currentWorkStatus() {
     const ws = window.workSummary;
     if (!ws || typeof ws.buildWorkStatus !== "function") return null;
-    const active = liveTools.filter(
+    const active = cur.liveTools.filter(
       (t) => t.status !== "completed" && t.status !== "failed"
     );
     return ws.buildWorkStatus({
-      tools: liveTools,
-      planEntries: livePlan,
+      tools: cur.liveTools,
+      planEntries: cur.livePlan,
       phase: bag().statusPhase,
       currentTool: active[0] ? humanizeToolTitle(active[0].title) : lastStatusLabel,
       elapsed: turnStartedAt ? fmtElapsed(Date.now() - turnStartedAt) : "",
@@ -309,7 +346,7 @@
   function paintStatusText() {
     if (!el.statusText) return;
     const work = currentWorkStatus();
-    if (work && (work.headline || work.now) && (liveTools.length || livePlan.length)) {
+    if (work && (work.headline || work.now) && (cur.liveTools.length || cur.livePlan.length)) {
       const line = [work.headline, work.footer].filter(Boolean).join(" · ");
       el.statusText.textContent = line || lastStatusLabel || tr("Working…");
       if (el.statusSub) {
@@ -348,7 +385,7 @@
 
   function setStatus(phase, detail, forMode, opts = {}) {
     const target = forMode || mode;
-    const b = bags[target];
+    const b = bag(target);
     const streamPhases = [
       "thinking",
       "tool",
@@ -375,8 +412,8 @@
       sid &&
       streamPhases.includes(phase) &&
       mode === "grok" &&
-      selectedId &&
-      selectedId !== sid
+      cur.selectedId &&
+      cur.selectedId !== sid
     ) {
       const buf = ensureSessionStream(sid);
       if (buf) {
@@ -426,7 +463,7 @@
     if (label.length > 60) label = humanizeToolTitle(label);
 
     if (!label || phase === "done") {
-      if (!busy) {
+      if (!cur.busy) {
         el.statusBar.classList.add("hidden");
       } else {
         lastStatusLabel = label || tr("Thinking…");
@@ -441,19 +478,19 @@
   }
 
   function renderActivity() {
-    const active = liveTools.filter((t) => t.status !== "completed" && t.status !== "failed");
-    const done = liveTools.filter((t) => t.status === "completed" || t.status === "failed");
+    const active = cur.liveTools.filter((t) => t.status !== "completed" && t.status !== "failed");
+    const done = cur.liveTools.filter((t) => t.status === "completed" || t.status === "failed");
     const work = currentWorkStatus();
     const countLabel = work && work.headline
       ? work.headline
       : `${tr("Steps")} (${liveTools.length})`;
     el.btnToggleActivity.classList.toggle(
       "hidden",
-      liveTools.length === 0 && livePlan.length === 0
+      cur.liveTools.length === 0 && cur.livePlan.length === 0
     );
-    el.btnToggleActivity.textContent = showActivity ? tr("Hide steps") : countLabel;
+    el.btnToggleActivity.textContent = cur.showActivity ? tr("Hide steps") : countLabel;
 
-    if (!showActivity || (!liveTools.length && !livePlan.length)) {
+    if (!cur.showActivity || (!cur.liveTools.length && !cur.livePlan.length)) {
       el.activityPanel.classList.add("hidden");
       el.activityPanel.innerHTML = "";
       return;
@@ -552,10 +589,10 @@
         mode !== "home" || homeKind === "chat"
       );
     }
-    setBusy(busy); // odśwież UI busy dla TEGO trybu
+    setBusy(cur.busy); // odśwież UI busy dla TEGO trybu
     if (bag().statusDetail || bag().statusPhase) {
       setStatus(bag().statusPhase, bag().statusDetail);
-    } else if (!busy) {
+    } else if (!cur.busy) {
       el.statusBar.classList.add("hidden");
     }
     renderList();
@@ -566,15 +603,15 @@
 
     // Przywróć ostatnią sesję tego trybu (nie wracaj zawsze na hero)
     if (restoreSession) {
-      const wantId = liveSessionId || selectedId;
+      const wantId = cur.liveSessionId || cur.selectedId;
       if (wantId) {
         const row = rowsForMode().find((r) => r.id === wantId);
         if (row) {
           // Jeśli wiadomości już w worku — tylko UI; inaczej dociągnij transcript
-          if (!allMessages.length) openSession(row, { fromSwitch: true });
+          if (!cur.allMessages.length) openSession(row, { fromSwitch: true });
           else {
-            selectedId = row.id;
-            liveSessionId = row.id;
+            cur.selectedId = row.id;
+            cur.liveSessionId = row.id;
             el.wsTitle.textContent = row.title;
             renderList();
           }
@@ -671,7 +708,7 @@
         const fl = sessionFlagMap[r.id] || {};
         li.className =
           "session-item" +
-          (r.id === selectedId || r.id === liveSessionId ? " selected" : "") +
+          (r.id === cur.selectedId || r.id === cur.liveSessionId ? " selected" : "") +
           (isWorking ? " working" : "") +
           (fl.unread ? " unread" : "") +
           (fl.pinned ? " pinned" : "");
@@ -720,10 +757,10 @@
   }
 
   function syncVisibleMessages() {
-    messages =
-      allMessages.length <= visibleCount
-        ? allMessages.slice()
-        : allMessages.slice(allMessages.length - visibleCount);
+    cur.widoczne =
+      cur.allMessages.length <= cur.visibleCount
+        ? cur.allMessages.slice()
+        : cur.allMessages.slice(cur.allMessages.length - cur.visibleCount);
   }
 
   function toolIcon(title) {
@@ -910,7 +947,7 @@
     // dopóki użytkownik nie ruszył scrolla ręcznie. Obserwujemy #messages.
     if (typeof ResizeObserver !== "undefined" && !box._layoutRo) {
       box._layoutRo = new ResizeObserver(() => {
-        if (!allMessages.length) return;
+        if (!cur.allMessages.length) return;
         layoutChatBottom();
         // treść urosła, a user trzymał dół → dociągnij
         if (scroller.shouldFollow()) {
@@ -1027,7 +1064,7 @@
     const typing = last.querySelector(".typing");
     if (typing && safe) typing.remove();
     // wysokość bańki rośnie → przelicz padding krótkiego czatu
-    if (allMessages.length && allMessages.length <= 4) layoutChatBottom();
+    if (cur.allMessages.length && cur.allMessages.length <= 4) layoutChatBottom();
     // tylko gdy user trzyma dół
     if (stickToBottom && nearBottom(160)) {
       scrollChatToBottom(true);
@@ -1070,7 +1107,7 @@
         const sum =
           (window.workSummary && window.workSummary.summarizeTools(tools)) || "";
         // sama warstwa myślenia bez narzędzi → pusty chip, nie „Thinking”
-        pill.textContent = sum || (m._streaming && busy ? "Thinking…" : "");
+        pill.textContent = sum || (m._streaming && cur.busy ? "Thinking…" : "");
       }
       if (pill.textContent) body.appendChild(pill);
     }
@@ -1234,7 +1271,7 @@
     const box = el.chatScroll;
     const msgs = el.messages;
     if (!box || !msgs) return;
-    if (!allMessages.length) {
+    if (!cur.allMessages.length) {
       msgs.style.paddingTop = "";
       return;
     }
@@ -1284,8 +1321,8 @@
   }
 
   function renderMessages(opts = {}) {
-    if (busy && !opts.force && !opts.forceScroll) {
-      if (streamingAssistant) patchLastAssistantBubble(streamingAssistant);
+    if (cur.busy && !opts.force && !opts.forceScroll) {
+      if (cur.streamingAssistant) patchLastAssistantBubble(cur.streamingAssistant);
       return;
     }
     const forceScroll = Boolean(opts.forceScroll);
@@ -1296,19 +1333,19 @@
 
     // NIE chowaj visibility — to dawało skok na górę (scrollHeight=0)
     const frag = document.createDocumentFragment();
-    const hasMsgs = allMessages.length > 0;
+    const hasMsgs = cur.allMessages.length > 0;
     el.homeHero.classList.toggle("hidden", hasMsgs);
 
-    if (allMessages.length > messages.length) {
+    if (cur.allMessages.length > cur.widoczne.length) {
       const more = document.createElement("button");
       more.type = "button";
       more.className = "load-more";
-      more.textContent = `Load earlier (${allMessages.length - messages.length})`;
+      more.textContent = `Load earlier (${allMessages.length - widoczne.length})`;
       more.onclick = () => {
         const box2 = el.chatScroll;
         const oldH = box2 ? box2.scrollHeight : 0;
         const oldT = box2 ? box2.scrollTop : 0;
-        visibleCount = Math.min(allMessages.length, visibleCount + PAGE);
+        cur.visibleCount = Math.min(cur.allMessages.length, cur.visibleCount + PAGE);
         syncVisibleMessages();
         stickToBottom = false;
         renderMessages({ force: true });
@@ -1321,7 +1358,7 @@
       frag.appendChild(more);
     }
 
-    for (const m of messages) {
+    for (const m of cur.widoczne) {
       frag.appendChild(buildMessageRow(m));
     }
 
@@ -1347,14 +1384,14 @@
 
 
   function renderAttachChips() {
-    if (!attachments.length) {
+    if (!cur.attachments.length) {
       el.attachChips.classList.add("hidden");
       el.attachChips.innerHTML = "";
       return;
     }
     el.attachChips.classList.remove("hidden");
     el.attachChips.innerHTML = "";
-    attachments.forEach((a, i) => {
+    cur.attachments.forEach((a, i) => {
       const chip = document.createElement("div");
       chip.className = "attach-chip";
       const label = document.createElement("span");
@@ -1365,7 +1402,7 @@
       x.type = "button";
       x.textContent = "×";
       x.onclick = () => {
-        attachments.splice(i, 1);
+        cur.attachments.splice(i, 1);
         renderAttachChips();
       };
       chip.appendChild(label);
@@ -1514,7 +1551,7 @@
     } else if (payload.busySessionId) {
       setSessionBusy(payload.busySessionId, true);
     }
-    if (!selectedId) updatePathChips(mode === "home" ? "" : defaultCwd);
+    if (!cur.selectedId) updatePathChips(mode === "home" ? "" : defaultCwd);
 
     applyAccount(payload.account);
     if (mode === "grok" && payload.models?.availableModels?.length) {
@@ -1552,42 +1589,6 @@
     applyPayload(await api.list());
   }
 
-  function ensureSessionStream(sid) {
-    if (!sid) return null;
-    if (!streamBySession[sid]) {
-      streamBySession[sid] = {
-        allMessages: [],
-        streamingAssistant: null,
-        liveTools: [],
-        livePlan: [],
-        messageQueue: [],
-        statusPhase: "",
-        statusDetail: "",
-      };
-    }
-    return streamBySession[sid];
-  }
-
-  /** Zapisz live stan Build sesji przed przełączeniem. */
-  function snapshotCurrentBuildSession() {
-    if (mode !== "grok" || !liveSessionId) return;
-    // openSession ustawia liveSessionId OD RAZU, ale czeka na transkrypt.
-    // W tym oknie allMessages należy jeszcze do poprzedniej sesji — zrzut
-    // zapisałby czat A pod kluczem B.
-    if (loadingSid && loadingSid === liveSessionId) return;
-    const sid = liveSessionId;
-    streamBySession[sid] = {
-      allMessages: allMessages.slice(),
-      streamingAssistant,
-      liveTools: (liveTools || []).slice(),
-      livePlan: (livePlan || []).slice(),
-      messageQueue: (messageQueue || []).slice(),
-      attachments: (attachments || []).slice(),
-      statusPhase: bag().statusPhase || "",
-      statusDetail: bag().statusDetail || "",
-    };
-  }
-
   /**
    * Tytuł z pierwszej wiadomości usera, trzymany w oknie.
    * Skan dysku bierze go z updates.jsonl, ale agent zapisuje ten plik
@@ -1618,7 +1619,7 @@
 
   function rememberLocalTitle(sid) {
     if (!sid || localTitles[sid]) return;
-    const first = allMessages.find(
+    const first = cur.allMessages.find(
       (m) => m && m.role === "user" && String(m.text || "").trim()
     );
     if (!first) return;
@@ -1652,37 +1653,25 @@
       buf.streamingAssistant = null;
     }
     if (isViewingSession(sid)) {
-      for (const m of allMessages) if (m) m._streaming = false;
-      streamingAssistant = null;
-    }
-  }
-
-  function stampSessionId(sid) {
-    if (!sid) return;
-    for (const m of allMessages) {
-      if (!m._sid) m._sid = sid;
-    }
-    if (streamingAssistant && !streamingAssistant._sid) {
-      streamingAssistant._sid = sid;
+      for (const m of cur.allMessages) if (m) m._streaming = false;
+      cur.streamingAssistant = null;
     }
   }
 
   /** New chat gets a real session id mid-turn — stay on this view. */
   function adoptBuildSession(sid) {
     if (!sid || mode !== "grok") return;
-    if (selectedId === sid || liveSessionId === sid) {
-      stampSessionId(sid);
-      return;
+    if (cur.selectedId === sid || cur.liveSessionId === sid) {
+        return;
     }
     if (!awaitingOwnNewSession()) return;
-    if (selectedId && selectedId !== sid) return;
-    if (streamBySession[sid] && liveSessionId !== sid) return;
-    selectedId = sid;
-    liveSessionId = sid;
-    pendingNewSession = false;
-    stampSessionId(sid);
+    if (cur.selectedId && cur.selectedId !== sid) return;
+    if (streamBySession[sid] && cur.liveSessionId !== sid) return;
+    // Rekord "grok:new" dostaje prawdziwy klucz. Zero stemplowania wiadomosci
+    // — leza w tablicy SWOJEJ sesji od momentu wpisania.
     rememberLocalTitle(sid);
-    snapshotCurrentBuildSession();
+    rekeyNewSession("grok", sid);
+    pendingNewSession = false;
     persistNav();
     renderList();
   }
@@ -1691,40 +1680,37 @@
     if (!sid) return false;
     if (detachedBuild) return false;
     if (mode !== "grok") return false;
-    if (selectedId === sid || liveSessionId === sid) return true;
+    if (cur.selectedId === sid || cur.liveSessionId === sid) return true;
     // Nowy czat: bierzemy tylko sid, którego jeszcze nie ma inna karta
-    if (awaitingOwnNewSession() && !selectedId && !streamBySession[sid]) return true;
+    if (awaitingOwnNewSession() && !cur.selectedId && !streamBySession[sid]) return true;
     return false;
   }
 
   /** Wyczyść chrome UI (status, kroki, załączniki) — obca sesja. */
   function clearForeignSessionChrome() {
-    liveTools = [];
-    livePlan = [];
+    cur.liveTools = [];
+    cur.livePlan = [];
     renderActivity();
-    attachments = [];
+    cur.attachments = [];
     renderAttachChips();
     el.statusBar.classList.add("hidden");
     el.statusText.textContent = "";
     bag().statusPhase = "";
     bag().statusDetail = "";
-    showActivity = false;
+    cur.showActivity = false;
   }
 
   async function openSession(row, opts = {}) {
     bumpViewEpoch();
     detachedBuild = false;
-    if (mode === "grok" && liveSessionId && liveSessionId !== row.id) {
-      snapshotCurrentBuildSession();
-    }
-
-    selectedId = row.id;
-    liveSessionId = row.id;
+    // Przelaczenie sesji = podmiana wskaznika na rekord. Nic sie nie kopiuje,
+    // wiec nie ma czego zgubic ani zapisac pod kluczem innej sesji.
+    setActive(mode, row.id);
     // Kliknięcie w istniejącą kartę kończy stan „czekam na sid nowego czatu”.
     // Zawieszona flaga pozwalała później przygarnąć cudzy sid.
     pendingNewSession = false;
     el.wsTitle.textContent = displayTitle(row);
-    bag().wsTitle = displayTitle(row);
+    cur.wsTitle = displayTitle(row);
     updatePathChips(row.cwd);
     renderList();
 
@@ -1740,16 +1726,16 @@
       const loadView =
         chatHistory.loadSessionView ||
         ((a) => (a || []).slice());
-      allMessages = loadView(live.allMessages || [], allMessages, row.id);
-      streamingAssistant =
+      cur.allMessages = loadView(live.allMessages || [], cur.allMessages, row.id);
+      cur.streamingAssistant =
         live.streamingAssistant ||
-        allMessages.find((m) => m.role === "assistant" && m._streaming) ||
+        cur.allMessages.find((m) => m.role === "assistant" && m._streaming) ||
         null;
-      liveTools = (live.liveTools || []).slice();
-      livePlan = (live.livePlan || []).slice();
-      messageQueue = (live.messageQueue || []).slice();
-      attachments = (live.attachments || []).slice();
-      visibleCount = Math.max(PAGE, allMessages.length);
+      cur.liveTools = (live.liveTools || []).slice();
+      cur.livePlan = (live.livePlan || []).slice();
+      cur.messageQueue = (live.messageQueue || []).slice();
+      cur.attachments = (live.attachments || []).slice();
+      cur.visibleCount = Math.max(PAGE, cur.allMessages.length);
       syncVisibleMessages();
       renderMessages({ forceScroll: true });
       renderActivity();
@@ -1772,9 +1758,9 @@
     }
 
     // Obca sesja (albo bez pracy) — transkrypt bez wipe przed await
-    streamingAssistant = null;
-    liveTools = [];
-    livePlan = [];
+    cur.streamingAssistant = null;
+    cur.liveTools = [];
+    cur.livePlan = [];
     // Kolejka należy do SESJI, nie do okna. Zerowanie jej tutaj kasowało
     // dopowiedzenia napisane w A, gdy user zajrzał do B i wrócił.
     messageQueue = (
@@ -1789,7 +1775,7 @@
       []
     ).slice();
     renderAttachChips();
-    visibleCount = PAGE;
+    cur.visibleCount = PAGE;
     renderActivity();
 
     loadingSid = row.id;
@@ -1804,7 +1790,7 @@
       if (loadingSid === row.id) loadingSid = null;
     }
     // race: user could have switched again
-    if (selectedId !== row.id) return;
+    if (cur.selectedId !== row.id) return;
 
     if (tr.error) showToast(tr.error, "error");
     const mapped = (tr.messages || [])
@@ -1853,14 +1839,14 @@
     );
     const merge =
       chatHistory.mergeTranscriptWithLocals || ((a, b) => a.concat(b || []));
-    const extras = allMessages.filter(
+    const extras = cur.allMessages.filter(
       (m) => m && (m._local || m._streaming) && m._sid === row.id
     );
     const fromBuf = ((streamBySession[row.id] &&
       streamBySession[row.id].allMessages) ||
       []).filter((m) => m && (m._local || m._streaming) && m._sid === row.id);
-    allMessages = merge(cleaned, extras.concat(fromBuf));
-    for (const m of allMessages) {
+    cur.allMessages = merge(cleaned, extras.concat(fromBuf));
+    for (const m of cur.allMessages) {
       if (!m._sid) m._sid = row.id;
     }
     holdStick(1200);
@@ -1887,13 +1873,13 @@
   /** Indeks wiadomości w allMessages po id. */
   function indexOfMsg(m) {
     if (!m) return -1;
-    return allMessages.findIndex((x) => x === m || (m.id && x.id === m.id));
+    return cur.allMessages.findIndex((x) => x === m || (m.id && x.id === m.id));
   }
 
   /** Ostatnia wiadomość użytkownika przed indeksem i. */
   function lastUserBefore(i) {
     for (let k = i; k >= 0; k--) {
-      if (allMessages[k].role === "user") return allMessages[k];
+      if (cur.allMessages[k].role === "user") return cur.allMessages[k];
     }
     return null;
   }
@@ -1905,7 +1891,7 @@
   async function deleteMessage(m) {
     const i = indexOfMsg(m);
     if (i < 0) return;
-    allMessages.splice(i, 1);
+    cur.allMessages.splice(i, 1);
     syncVisibleMessages();
     renderMessages({ force: true });
     pushBag();
@@ -1920,7 +1906,7 @@
 
   /** Wstaw treść do composera i odetnij historię od tego miejsca (widok). */
   async function editMessage(m) {
-    if (busy) {
+    if (cur.busy) {
       showToast(tr("Stop the current turn first (■)"), "");
       return;
     }
@@ -1928,7 +1914,7 @@
     if (i < 0) return;
     el.input.value = cleanUserText(m.text || "");
     autosize();
-    allMessages = allMessages.slice(0, i);
+    cur.allMessages = cur.allMessages.slice(0, i);
     syncVisibleMessages();
     renderMessages({ force: true });
     pushBag();
@@ -1944,7 +1930,7 @@
 
   /** Wyślij ponownie: z bańki usera tę samą, z bańki asystenta poprzedni prompt. */
   async function retryFrom(m) {
-    if (busy) {
+    if (cur.busy) {
       showToast(tr("Stop the current turn first (■)"), "");
       return;
     }
@@ -1960,7 +1946,7 @@
     if (!text && !atts.length) return;
     // odetnij od wiadomości źródłowej w dół — nowa odpowiedź zajmie jej miejsce
     const from = indexOfMsg(src);
-    allMessages = allMessages.slice(0, from);
+    cur.allMessages = cur.allMessages.slice(0, from);
     syncVisibleMessages();
     renderMessages({ force: true });
     await persistHomeView();
@@ -1994,12 +1980,12 @@
   }
 
   function pushAll(msg) {
-    allMessages.push(msg);
+    cur.allMessages.push(msg);
     syncVisibleMessages();
   }
 
   function lastAll() {
-    return allMessages[allMessages.length - 1] || null;
+    return cur.allMessages[cur.allMessages.length - 1] || null;
   }
 
   function closeStreamingAssistant() {
@@ -2007,21 +1993,21 @@
       cancelAnimationFrame(handleChatUpdate._raf);
       handleChatUpdate._raf = null;
     }
-    if (streamingAssistant) {
-      streamingAssistant._streaming = false;
-      streamingAssistant = null;
+    if (cur.streamingAssistant) {
+      cur.streamingAssistant._streaming = false;
+      cur.streamingAssistant = null;
     }
   }
 
   function ensureStreamingAssistant() {
-    if (streamingAssistant && streamingAssistant._streaming) {
+    if (cur.streamingAssistant && cur.streamingAssistant._streaming) {
       const after = lastAll();
       // user already sent a follow-up — do not keep writing into the old bubble
-      if (after && after !== streamingAssistant) {
-        streamingAssistant._streaming = false;
-        streamingAssistant = null;
+      if (after && after !== cur.streamingAssistant) {
+        cur.streamingAssistant._streaming = false;
+        cur.streamingAssistant = null;
       } else {
-        return streamingAssistant;
+        return cur.streamingAssistant;
       }
     }
     const last = lastAll();
@@ -2031,7 +2017,7 @@
       !String(last.text || "").trim() &&
       !(last.tools && last.tools.length);
     if (emptyShell) {
-      streamingAssistant = last;
+      cur.streamingAssistant = last;
       last._streaming = true;
       return last;
     }
@@ -2044,12 +2030,12 @@
       thinking: "",
       _streaming: true,
     };
-    pushAll(streamingAssistant);
-    const row = findAssistantRowFor(streamingAssistant);
+    pushAll(cur.streamingAssistant);
+    const row = findAssistantRowFor(cur.streamingAssistant);
     if (!row) {
-      appendMessageRows([streamingAssistant], { stick: false });
+      appendMessageRows([cur.streamingAssistant], { stick: false });
     }
-    return streamingAssistant;
+    return cur.streamingAssistant;
   }
 
   /** Normalizacja do porównań echa (spacje / załączniki). */
@@ -2065,8 +2051,8 @@
     const want = normUserText(t);
     if (!want) return true;
     let seen = 0;
-    for (let i = allMessages.length - 1; i >= 0 && seen < 8; i--) {
-      const m = allMessages[i];
+    for (let i = cur.allMessages.length - 1; i >= 0 && seen < 8; i--) {
+      const m = cur.allMessages[i];
       if (m.role !== "user") continue;
       seen++;
       const got = normUserText(m.text);
@@ -2080,8 +2066,8 @@
   function dedupeTrailingUserMessages() {
     let lastUserNorm = null;
     const removeIds = new Set();
-    for (let i = allMessages.length - 1; i >= 0; i--) {
-      const m = allMessages[i];
+    for (let i = cur.allMessages.length - 1; i >= 0; i--) {
+      const m = cur.allMessages[i];
       if (m.role !== "user") {
         if (m.role === "assistant" && !m.text && !m.tools?.length) continue;
         // po napotkaniu realnej odpowiedzi asystenta kończymy skan „ogona”
@@ -2101,7 +2087,7 @@
       lastUserNorm = n;
     }
     if (!removeIds.size) return;
-    allMessages = allMessages.filter((m) => !removeIds.has(m.id));
+    cur.allMessages = cur.allMessages.filter((m) => !removeIds.has(m.id));
     syncVisibleMessages();
     // DOM: kasuj DOKŁADNIE to, co wypadło z modelu. Skan po tekście leciał po
     // CAŁEJ historii i usuwał z widoku starsze „ok”, które w modelu zostawało —
@@ -2111,7 +2097,7 @@
         .querySelector(`.msg.user[data-msg-id="${cssAttr(id)}"]`)
         ?.remove();
     }
-    bag().allMessages = allMessages;
+    bag().allMessages = cur.allMessages;
   }
 
   /** Stream do bufora sesji (UI jest na innej sesji / Home). */
@@ -2231,7 +2217,7 @@
     // właśnie widać. Wcześniej lądował w buforze offscreen i Home wyglądał,
     // jakby nic się nie działo aż do końca odpowiedzi.
     if (mode === "home") {
-      if (!busy) return;
+      if (!cur.busy) return;
       const update = params.update || params;
       if (update.sessionUpdate !== "agent_message_chunk") return;
       const chunk = (update.content && update.content.text) || "";
@@ -2263,16 +2249,13 @@
 
     if (kind === "user_message_chunk") {
       if (params && params._local) return;
-      if (busy || streamingAssistant) return;
+      if (cur.busy || cur.streamingAssistant) return;
       return;
     }
 
     if (kind === "turn_completed" || kind === "task_completed") {
       closeStreamingAssistant();
-      if (sid) {
-        snapshotCurrentBuildSession();
-        clearStreamingFlags(sid);
-      }
+      if (sid) clearStreamingFlags(sid);
       return;
     }
 
@@ -2281,11 +2264,10 @@
       if (isAttachmentJunkOnly(chunk)) return;
       if (isToolEchoText(chunk)) {
         setStatus("tool", tr("Working in the background…"), "grok", { sessionId: sid });
-        if (streamingAssistant) {
-          streamingAssistant.text = cleanAssistantText(streamingAssistant.text);
-          patchLastAssistantBubble(streamingAssistant);
+        if (cur.streamingAssistant) {
+          cur.streamingAssistant.text = cleanAssistantText(cur.streamingAssistant.text);
+          patchLastAssistantBubble(cur.streamingAssistant);
         }
-        if (sid) snapshotCurrentBuildSession();
         return;
       }
       const a = ensureStreamingAssistant();
@@ -2301,7 +2283,6 @@
         handleChatUpdate._raf = requestAnimationFrame(() => {
           handleChatUpdate._raf = null;
           patchLastAssistantBubble(a);
-          if (sid) snapshotCurrentBuildSession();
         });
       }
       return;
@@ -2311,12 +2292,11 @@
       const a = ensureStreamingAssistant();
       a.thinking += (update.content && update.content.text) || "";
       setStatus("thinking", tr("Thinking…"), "grok", { sessionId: sid });
-      if (sid) snapshotCurrentBuildSession();
       return;
     }
 
     if (kind === "plan") {
-      livePlan = Array.isArray(update.entries) ? update.entries.slice() : [];
+      cur.livePlan = Array.isArray(update.entries) ? update.entries.slice() : [];
       const work = currentWorkStatus();
       if (work && work.now) {
         setStatus("tool", work.now, "grok", { sessionId: sid });
@@ -2324,8 +2304,7 @@
         paintStatusText();
       }
       renderActivity();
-      if (streamingAssistant) patchAgentWorkPill(streamingAssistant);
-      if (sid) snapshotCurrentBuildSession();
+      if (cur.streamingAssistant) patchAgentWorkPill(cur.streamingAssistant);
       scheduleSteerQueue("plan");
       return;
     }
@@ -2339,12 +2318,11 @@
         status: update.status || "pending",
       };
       a.tools.push(tool);
-      liveTools.push({ ...tool });
+      cur.liveTools.push({ ...tool });
       setStatus("tool", humanizeToolTitle(rawTitle), "grok", { sessionId: sid });
       paintStatusText();
       renderActivity();
       patchAgentWorkPill(a);
-      if (sid) snapshotCurrentBuildSession();
       return;
     }
 
@@ -2357,7 +2335,7 @@
         if (update.status) tool.status = update.status;
         if (update.title) tool.title = update.title;
       }
-      const lt = liveTools.find((t) => t.id === id) || liveTools[liveTools.length - 1];
+      const lt = cur.liveTools.find((t) => t.id === id) || cur.liveTools[cur.liveTools.length - 1];
       if (lt) {
         if (update.status) lt.status = update.status;
         if (update.title) lt.title = update.title;
@@ -2370,8 +2348,7 @@
       paintStatusText();
       renderActivity();
       patchAgentWorkPill(a);
-      if (sid) snapshotCurrentBuildSession();
-      const stillActive = liveTools.some(
+      const stillActive = cur.liveTools.some(
         (t) => t.status !== "completed" && t.status !== "failed"
       );
       if (
@@ -2427,7 +2404,7 @@
     const update = params.update || params;
     const kind = update.sessionUpdate;
     if (!kind) return;
-    const b = bags.grok;
+    const b = bag("grok");
     const ensure = () => {
       if (b.streamingAssistant) return b.streamingAssistant;
       b.streamingAssistant = {
@@ -2489,16 +2466,16 @@
 
   function setBusy(b, forMode) {
     const target = forMode || mode;
-    bags[target].busy = Boolean(b);
+    bag(target).busy = Boolean(b);
     if (target !== mode) return; // nie ruszaj UI drugiego trybu
 
-    busy = Boolean(b);
-    if (busy) startTurnTimer();
+    cur.busy = Boolean(b);
+    if (cur.busy) startTurnTimer();
     else stopTurnTimer();
     const viewingBusySession =
       mode === "home"
-        ? busy
-        : isSessionBusy(liveSessionId || selectedId);
+        ? cur.busy
+        : isSessionBusy(cur.liveSessionId || cur.selectedId);
     // Composer aktywny. Kolejka tylko gdy TA sesja pisze.
     el.btnSend.disabled = false;
     el.btnSend.classList.remove("hidden");
@@ -2530,8 +2507,8 @@
     }
     updateQueueChip();
     if (!b) {
-      if (!messageQueue.length) el.statusBar.classList.add("hidden");
-      if (streamingAssistant) streamingAssistant._streaming = false;
+      if (!cur.messageQueue.length) el.statusBar.classList.add("hidden");
+      if (cur.streamingAssistant) cur.streamingAssistant._streaming = false;
     }
     renderQueueDock();
   }
@@ -2544,7 +2521,7 @@
       chip.className = "chip queue hidden";
       el.busyChip.parentElement.insertBefore(chip, el.busyChip.nextSibling);
     }
-    if (messageQueue.length) {
+    if (cur.messageQueue.length) {
       chip.classList.remove("hidden");
       chip.textContent = `${tr("Queue")}: ${messageQueue.length}`;
       chip.title = tr("Send queued messages now");
@@ -2742,7 +2719,7 @@
       showToast(res.error || tr("Attach failed"), "error");
       return;
     }
-    attachments.push(res);
+    cur.attachments.push(res);
     renderAttachChips();
   }
 
@@ -2752,30 +2729,30 @@
       showToast(res.error || tr("Import failed"), "error");
       return;
     }
-    attachments.push(res);
+    cur.attachments.push(res);
     renderAttachChips();
   }
 
   async function sendMessage(prefill) {
     const text = (prefill != null ? prefill : el.input.value).trim();
-    if (!text && !attachments.length) return;
+    if (!text && !cur.attachments.length) return;
 
-    const atts = attachments.slice();
+    const atts = cur.attachments.slice();
 
     // Agent busy → osobna pozycja w kolejce (nie sklejaj z poprzednią).
     // Trzeci warunek: świeży czat Build już startuje, ale nie zna jeszcze sid.
     // Bez tego drugi Enter przed poznaniem sid zakładał KOLEJNĄ sesję i drugi
     // proces agenta — dwie karty z jednego pytania.
     const nowaWStarcie =
-      mode === "grok" && !liveSessionId && !selectedId && busy;
+      mode === "grok" && !cur.liveSessionId && !cur.selectedId && cur.busy;
     if (
-      isSessionBusy(liveSessionId || selectedId) ||
-      (mode === "home" && busy) ||
+      isSessionBusy(cur.liveSessionId || cur.selectedId) ||
+      (mode === "home" && cur.busy) ||
       nowaWStarcie
     ) {
       const piece = text || tr("(attachment)");
       const qid = `u-q-${Date.now()}-${messageQueue.length}`;
-      messageQueue.push({ id: qid, text: piece, attachments: atts });
+      cur.messageQueue.push({ id: qid, text: piece, attachments: atts });
       pushAll({
         id: qid,
         role: "user",
@@ -2786,7 +2763,7 @@
         _queued: true,
       });
       if (prefill == null) el.input.value = "";
-      attachments = [];
+      cur.attachments = [];
       renderAttachChips();
       autosize();
       appendMessageRows([lastAll()], { stick: true });
@@ -2825,9 +2802,9 @@
   }
 
   function removeQueuedById(id) {
-    messageQueue = messageQueue.filter((q) => q.id !== id);
-    const idx = allMessages.findIndex((m) => m.id === id && m._queued);
-    if (idx >= 0) allMessages.splice(idx, 1);
+    cur.messageQueue = cur.messageQueue.filter((q) => q.id !== id);
+    const idx = cur.allMessages.findIndex((m) => m.id === id && m._queued);
+    if (idx >= 0) cur.allMessages.splice(idx, 1);
     syncVisibleMessages();
     const row = id
       ? el.messages.querySelector(`.msg.user[data-msg-id="${cssAttr(id)}"]`)
@@ -2840,7 +2817,7 @@
   function renderQueueDock() {
     const dock = document.getElementById("queue-dock");
     if (!dock) return;
-    if (!messageQueue.length) {
+    if (!cur.messageQueue.length) {
       dock.classList.add("hidden");
       dock.innerHTML = "";
       return;
@@ -2861,7 +2838,7 @@
     head.appendChild(title);
     head.appendChild(sendAll);
     dock.appendChild(head);
-    for (const item of messageQueue) {
+    for (const item of cur.messageQueue) {
       const row = document.createElement("div");
       row.className = "queue-dock-item";
       const preview = document.createElement("span");
@@ -2887,9 +2864,9 @@
   }
 
   async function injectOldestQueued() {
-    const first = messageQueue[0];
+    const first = cur.messageQueue[0];
     if (!first) return;
-    const msg = allMessages.find((m) => m.id === first.id) || first;
+    const msg = cur.allMessages.find((m) => m.id === first.id) || first;
     await injectQueuedNow(msg);
   }
 
@@ -2902,7 +2879,7 @@
   let steeringQueue = false;
 
   function scheduleSteerQueue(reason) {
-    if (!messageQueue.length || steeringQueue || drainingQueue) return;
+    if (!cur.messageQueue.length || steeringQueue || drainingQueue) return;
     if (steerTimer) clearTimeout(steerTimer);
     steerTimer = setTimeout(() => {
       steerTimer = 0;
@@ -2911,17 +2888,17 @@
   }
 
   function maybeSteerQueue(reason) {
-    if (!messageQueue.length || steeringQueue || drainingQueue || !busy) return;
+    if (!cur.messageQueue.length || steeringQueue || drainingQueue || !cur.busy) return;
     if (Date.now() - lastSteerAt < 8000) return;
-    const active = liveTools.some(
+    const active = cur.liveTools.some(
       (t) => t.status !== "completed" && t.status !== "failed"
     );
     if (active && reason !== "plan") return;
     steeringQueue = true;
     lastSteerAt = Date.now();
-    const first = messageQueue[0];
+    const first = cur.messageQueue[0];
     showToast(tr("Queued — will send after this batch"), "ok");
-    injectQueuedNow(allMessages.find((m) => m.id === first.id) || first)
+    injectQueuedNow(cur.allMessages.find((m) => m.id === first.id) || first)
       .catch(() => {})
       .finally(() => {
         steeringQueue = false;
@@ -2937,9 +2914,9 @@
     // (SIGTERM, potem SIGKILL po 3 s) — w tym oknie da się kliknąć inną kartę.
     // Wcześniej po awaicie funkcja czytała liveSessionId jeszcze raz i wysyłała
     // wiadomość napisaną w A do agenta sesji B, w cudzym katalogu roboczym.
-    const sid = liveSessionId || selectedId;
+    const sid = cur.liveSessionId || cur.selectedId;
     const keepId = msg.id;
-    messageQueue = messageQueue.filter((q) => q.id !== keepId);
+    cur.messageQueue = cur.messageQueue.filter((q) => q.id !== keepId);
     updateQueueChip();
 
     try {
@@ -2947,7 +2924,7 @@
     } catch {
       /* stop hung — send anyway */
     }
-    if ((liveSessionId || selectedId) !== sid) {
+    if ((cur.liveSessionId || cur.selectedId) !== sid) {
       // Widok już nie należy do tej sesji — wróć pozycję do JEJ kolejki.
       const buf = ensureSessionStream(sid);
       if (buf) {
@@ -2989,7 +2966,7 @@
   async function runSendTurn(text, atts, clearInput, opts = {}) {
     const cwd = selectedRow()?.cwd || defaultCwd;
     if (mode === "grok") detachedBuild = false;
-    const sessionId = liveSessionId || selectedId || null;
+    const sessionId = cur.liveSessionId || cur.selectedId || null;
     const turnMode = mode;
     pendingNewSession = mode === "grok" && !sessionId;
     if (pendingNewSession) pendingNewEpoch = viewEpoch;
@@ -2999,14 +2976,14 @@
     let queuedBubble = null;
     if (opts.queuedId) {
       queuedBubble =
-        allMessages.find((m) => m.id === opts.queuedId && m.role === "user") ||
+        cur.allMessages.find((m) => m.id === opts.queuedId && m.role === "user") ||
         null;
     }
     // 1) jawna flaga _queued (preferuj najnowszą)
     if (!queuedBubble) {
-      for (let i = allMessages.length - 1; i >= 0; i--) {
-        if (allMessages[i].role === "user" && allMessages[i]._queued) {
-          queuedBubble = allMessages[i];
+      for (let i = cur.allMessages.length - 1; i >= 0; i--) {
+        if (cur.allMessages[i].role === "user" && cur.allMessages[i]._queued) {
+          queuedBubble = cur.allMessages[i];
           break;
         }
       }
@@ -3014,8 +2991,8 @@
     // 2) inject: ta sama lokalna bańka usera o tym tekście (gdy flaga już spadła)
     if (!queuedBubble && opts.reuseQueuedBubble && displayText) {
       const want = normUserText(displayText);
-      for (let i = allMessages.length - 1; i >= 0; i--) {
-        const m = allMessages[i];
+      for (let i = cur.allMessages.length - 1; i >= 0; i--) {
+        const m = cur.allMessages[i];
         if (m.role !== "user" || !m._local) continue;
         const got = normUserText(m.text);
         if (
@@ -3057,7 +3034,7 @@
           tools: [],
           attachments: atts || [],
           _local: true,
-          _sid: selectedId || liveSessionId || null,
+          _sid: cur.selectedId || cur.liveSessionId || null,
           _ts: Date.now(),
         };
         pushAll(userMsg);
@@ -3065,25 +3042,25 @@
       }
     }
 
-    streamingAssistant = {
+    cur.streamingAssistant = {
       id: `stream-${Date.now()}`,
       role: "assistant",
       text: "",
       tools: [],
       thinking: "",
       _streaming: true,
-      _sid: selectedId || liveSessionId || null,
+      _sid: cur.selectedId || cur.liveSessionId || null,
     };
     // Bańka TEJ tury. Po await user może już oglądać inną sesję i moduł
     // `streamingAssistant` będzie wtedy wskazywał na cudzy stream.
-    const turnAssistant = streamingAssistant;
-    pushAll(streamingAssistant);
-    toAppend.push(streamingAssistant);
-    liveTools = [];
-    livePlan = [];
+    const turnAssistant = cur.streamingAssistant;
+    pushAll(cur.streamingAssistant);
+    toAppend.push(cur.streamingAssistant);
+    cur.liveTools = [];
+    cur.livePlan = [];
 
     if (clearInput) el.input.value = "";
-    attachments = [];
+    cur.attachments = [];
     renderAttachChips();
     autosize();
     // Enter: NIE wipe'uj DOM (replaceChildren = scrollTop→0 = skok w górę).
@@ -3093,7 +3070,7 @@
     // BEZ allMessages.length: syncVisibleMessages i tak tnie OGON, wiec swieze
     // banki zawsze sa w widoku, a paginacja przestawala dzialac po pierwszej
     // wysylce i kolejny pelny render budowal 1000+ baniek naraz.
-    visibleCount = Math.max(visibleCount, PAGE);
+    visibleCount = Math.max(cur.visibleCount, PAGE);
     syncVisibleMessages();
     if (toAppend.length) {
       appendMessageRows(toAppend, { stick: true });
@@ -3106,7 +3083,6 @@
     setBusy(true);
     if (mode === "grok" && sessionId) {
       setSessionBusy(sessionId, true);
-      snapshotCurrentBuildSession();
     }
     setStatus("thinking", mode === "home" ? tr("Thinking…") : tr("Agent starting…"), mode, {
       sessionId,
@@ -3174,7 +3150,6 @@
     // posprzątaj echa które weszły mimo bramek
     dedupeTrailingUserMessages();
     if (res.ok && res.sessionId && streamBySession[res.sessionId]) {
-      snapshotCurrentBuildSession();
     }
     setBusy(false);
     if (!res.ok) {
@@ -3187,9 +3162,10 @@
     }
 
     if (res.sessionId) {
-      liveSessionId = res.sessionId;
-      selectedId = res.sessionId;
       rememberLocalTitle(res.sessionId);
+      // Jeden ruch zamiast dwoch przypisan: rekord dostaje prawdziwy klucz,
+      // a selectedId i liveSessionId nie maja jak sie rozjechac.
+      if (cur.sid !== res.sessionId) rekeyNewSession(mode, res.sessionId);
     }
     if (turnAssistant) turnAssistant._streaming = false;
 
@@ -3291,13 +3267,13 @@
 
   /** Weź następną pozycję z kolejki — każda wiadomość to osobna tura. */
   function takeNextQueued() {
-    if (!messageQueue.length) return null;
-    return messageQueue.shift();
+    if (!cur.messageQueue.length) return null;
+    return cur.messageQueue.shift();
   }
 
   async function drainQueue() {
-    if (drainingQueue || busy) return;
-    if (!messageQueue.length) {
+    if (drainingQueue || cur.busy) return;
+    if (!cur.messageQueue.length) {
       updateQueueChip();
       return;
     }
@@ -3316,9 +3292,9 @@
 
   async function persistHomeView() {
     if (mode !== "home") return;
-    const id = liveSessionId || selectedId;
+    const id = cur.liveSessionId || cur.selectedId;
     if (!id || typeof api.replaceHomeMessages !== "function") return;
-    const messages = allMessages
+    const messages = cur.allMessages
       .filter((m) => m && !m._streaming && !m._queued)
       .map((m) => ({
         id: m.id,
@@ -3338,13 +3314,13 @@
 
   async function newChat() {
     bumpViewEpoch();
-    const wasBusy = Boolean(busy || isSessionBusy(liveSessionId));
+    const wasBusy = Boolean(cur.busy || isSessionBusy(cur.liveSessionId));
     if (mode === "grok") {
-      if (liveSessionId) snapshotCurrentBuildSession();
       detachedBuild = true;
-      bags.grok.busy = false;
-      bags.grok.statusPhase = "";
-      bags.grok.statusDetail = "";
+      const g = bag("grok");
+      g.busy = false;
+      g.statusPhase = "";
+      g.statusDetail = "";
       setBusy(false, "grok");
       el.statusBar.classList.add("hidden");
     } else if (mode === "home" && wasBusy) {
@@ -3358,21 +3334,12 @@
       setBusy(false, "home");
     }
 
-    selectedId = null;
-    liveSessionId = null;
+    // Nowy czat = SWIEZY rekord pod kluczem "tryb:new". Zaden stary stan nie
+    // ma prawa przez niego przeciec, wiec nie zerujemy pol po kolei.
+    store.delete(keyOf(mode, null));
+    setActive(mode, null);
     pendingNewSession = false;
-    allMessages = [];
-    messages = [];
-    streamingAssistant = null;
-    liveTools = [];
-    livePlan = [];
-    visibleCount = PAGE;
-    attachments = [];
-    messageQueue = [];
-    bag().wsTitle = tr("New chat");
-    bag().busy = false;
-    bag().statusPhase = "";
-    bag().statusDetail = "";
+    cur.wsTitle = tr("New chat");
     renderAttachChips();
     el.wsTitle.textContent = tr("New chat");
     updatePathChips(mode === "home" ? "" : defaultCwd);
@@ -3409,7 +3376,7 @@
   }
 
   async function ctxAction(act) {
-    const id = ctxTargetId || selectedId;
+    const id = ctxTargetId || cur.selectedId;
     hideCtx();
 
     if (act === "new") {
@@ -3466,11 +3433,11 @@
       const res = await api.deleteSession({ id, mode });
       if (!res.ok) showToast(res.error, "error");
       else {
-        if (selectedId === id) {
-          selectedId = null;
-          liveSessionId = null;
-          allMessages = [];
-          messages = [];
+        if (cur.selectedId === id) {
+          cur.selectedId = null;
+          cur.liveSessionId = null;
+          cur.allMessages = [];
+          cur.widoczne = [];
           el.wsTitle.textContent = tr("New chat");
           renderMessages({ forceScroll: true });
         }
@@ -3495,7 +3462,7 @@
       });
       if (!res.ok) showToast(res.error || tr("Rename failed"), "error");
       else {
-        if (selectedId === id) el.wsTitle.textContent = String(name).trim();
+        if (cur.selectedId === id) el.wsTitle.textContent = String(name).trim();
         await refresh();
       }
     }
@@ -3535,15 +3502,15 @@
       cwd: selectedRow()?.cwd || defaultCwd,
       // Bez sessionId handler w main nie mial na czym zadzialac i cicho
       // konczyl {ok:true} — dropdown meldował sukces, agent nic nie wiedzial.
-      sessionId: liveSessionId || selectedId,
+      sessionId: cur.liveSessionId || cur.selectedId,
     });
     if (!res.ok) showToast(res.error || tr("Effort change failed"), "error");
     else showToast(`Effort: ${effortLevel}`, "ok");
   });
   el.form.onsubmit = (e) => {
     e.preventDefault();
-    const empty = !el.input.value.trim() && !attachments.length;
-    if (empty && messageQueue.length) {
+    const empty = !el.input.value.trim() && !cur.attachments.length;
+    if (empty && cur.messageQueue.length) {
       injectOldestQueued();
       return;
     }
@@ -3553,8 +3520,8 @@
   el.input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      const empty = !el.input.value.trim() && !attachments.length;
-      if (empty && messageQueue.length) {
+      const empty = !el.input.value.trim() && !cur.attachments.length;
+      if (empty && cur.messageQueue.length) {
         injectOldestQueued();
         return;
       }
@@ -3569,7 +3536,7 @@
     // przekaż tryb — w Home trzeba przerwać żądanie HTTP, nie proces agenta
     const res = await api.chatStop({
       mode,
-      sessionId: liveSessionId || selectedId,
+      sessionId: cur.liveSessionId || cur.selectedId,
     });
     setBusy(false);
     if (!res.ok) showToast(res.error || tr("Stop failed"), "error");
@@ -3582,12 +3549,12 @@
     const res = await api.chatSetModel({
       modelId: id,
       mode,
-      sessionId: liveSessionId || selectedId,
+      sessionId: cur.liveSessionId || cur.selectedId,
     });
     if (!res.ok) showToast(res.error || tr("Model change failed"), "error");
   });
   el.btnToggleActivity.onclick = () => {
-    showActivity = !showActivity;
+    cur.showActivity = !cur.showActivity;
     renderActivity();
   };
 
@@ -3611,7 +3578,7 @@
     e.stopPropagation();
     // Menu ⋯ działa zawsze (temat, new chat, settings) — nawet bez wybranej sesji
     const r = e.currentTarget.getBoundingClientRect();
-    showCtx(r.left, r.bottom + 4, selectedId || liveSessionId || null);
+    showCtx(r.left, r.bottom + 4, cur.selectedId || cur.liveSessionId || null);
   };
 
   el.ctxMenu.onclick = (e) => {
@@ -3627,7 +3594,7 @@
   document.getElementById("btn-attach").onclick = async () => {
     const files = await api.pickFiles();
     for (const f of files) {
-      if (f.ok) attachments.push(f);
+      if (f.ok) cur.attachments.push(f);
     }
     renderAttachChips();
     el.input.focus();
@@ -3784,7 +3751,7 @@
   api.onChatUpdate(handleChatUpdate);
   api.onChatBusy(({ busy: b, sessionId, mode: evMode }) => {
     if (evMode === "home") {
-      bags.home.busy = Boolean(b);
+      bag("home").busy = Boolean(b);
       if (mode === "home") setBusy(Boolean(b), "home");
       return;
     }
@@ -3799,8 +3766,7 @@
     }
     if (viewingThis) {
       setBusy(Boolean(b), mode);
-      if (b) snapshotCurrentBuildSession();
-    } else if (!sessionId && isViewingSession(liveSessionId || selectedId)) {
+    } else if (!sessionId && isViewingSession(cur.liveSessionId || cur.selectedId)) {
       setBusy(Boolean(b), mode);
     }
     renderList();
@@ -3885,10 +3851,9 @@
     const lastHome = data.settings?.lastHomeSessionId || "";
     const lastCode = data.settings?.lastCodeSessionId || "";
 
-    bags.home.selectedId = lastHome || null;
-    bags.home.liveSessionId = lastHome || null;
-    bags.grok.selectedId = lastCode || null;
-    bags.grok.liveSessionId = lastCode || null;
+    // Odtworzenie nawigacji = wskazanie, co jest otwarte w kazdym trybie.
+    setActive("home", lastHome || null);
+    setActive("grok", lastCode || null);
 
     setMode(lastMode, { restoreSession: false });
     pullBag();
@@ -3936,7 +3901,7 @@
     if (!usageEls.btn || typeof api.getUsage !== "function") return;
     const sid =
       mode === "grok"
-        ? liveSessionId || selectedId || null
+        ? cur.liveSessionId || cur.selectedId || null
         : null;
     try {
       const u = await api.getUsage({ sessionId: sid });
