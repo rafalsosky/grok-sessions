@@ -459,6 +459,10 @@
       return;
     }
     el.activityPanel.classList.remove("hidden");
+    // Panel byl przemalowywany przy KAZDYM ruchu narzedzia i zwijal sie sam.
+    const wasOpen = Boolean(
+      el.activityPanel.querySelector(".activity-done")?.open
+    );
     el.activityPanel.innerHTML = "";
     if (work && work.plan && work.plan.total) {
       const h = document.createElement("div");
@@ -498,6 +502,7 @@
         ? work.headline
         : `${tr("Show")} ${done.length} ${tr("completed")}`;
       det.appendChild(sum);
+      det.open = wasOpen;
       for (const t of done) {
         const row = document.createElement("div");
         row.className = "activity-row done";
@@ -995,6 +1000,12 @@
     if (!last) {
       // NIGDY full renderMessages w trakcie tury — tylko doklej
       appendMessageRows([m], { stick: false });
+      return;
+    }
+    // Zaznaczenie tekstu w tej bance ginelo przy kazdym chunku (innerHTML
+    // przepisywany co klatke). Kolejny chunk i tak dorenderuje po puszczeniu.
+    const sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed && sel.anchorNode && last.contains(sel.anchorNode)) {
       return;
     }
     let content = last.querySelector(".msg-content");
@@ -1771,6 +1782,13 @@
       []
     ).slice();
     clearForeignSessionChrome();
+    // Zalaczniki naleza do SESJI, tak jak kolejka. clearForeignSessionChrome
+    // je zerowalo, wiec zajrzenie do innej karty kasowalo przygotowane pliki.
+    attachments = (
+      (streamBySession[row.id] && streamBySession[row.id].attachments) ||
+      []
+    ).slice();
+    renderAttachChips();
     visibleCount = PAGE;
     renderActivity();
 
@@ -2152,6 +2170,10 @@
       if (buf.streamingAssistant) buf.streamingAssistant._streaming = false;
       buf.streamingAssistant = null;
       buf.statusPhase = "done";
+      // Bez tego narzedzia z poprzedniej tury doliczaly sie do nastepnej
+      // i pasek pokazywal „Read 40 files” zaraz po pierwszym pytaniu.
+      buf.liveTools = [];
+      buf.livePlan = [];
       return;
     }
     if (kind === "agent_message_chunk") {
@@ -2364,11 +2386,10 @@
   function patchAgentWorkPill(m) {
     if (!m || mode !== "grok") return;
     const stick = nearBottom();
-    let last = el.messages.lastElementChild;
-    if (!last || !last.classList.contains("assistant")) {
-      // bez full redraw — status bar wystarczy
-      return;
-    }
+    // lastElementChild zawodzil, gdy pod bańką asystenta stanela wiadomosc
+    // z kolejki — chip pracy zamieral do konca tury.
+    const last = findAssistantRowFor(m) || null;
+    if (!last) return;
     let pill = last.querySelector(".agent-work-summary");
     const active = (m.tools || []).filter(
       (t) => t.status !== "completed" && t.status !== "failed"
@@ -3069,7 +3090,10 @@
     // Tylko doklej nowe bańki na koniec + force scroll na dół.
     holdStick(1500);
     stickToBottom = true;
-    visibleCount = Math.max(visibleCount, allMessages.length, PAGE);
+    // BEZ allMessages.length: syncVisibleMessages i tak tnie OGON, wiec swieze
+    // banki zawsze sa w widoku, a paginacja przestawala dzialac po pierwszej
+    // wysylce i kolejny pelny render budowal 1000+ baniek naraz.
+    visibleCount = Math.max(visibleCount, PAGE);
     syncVisibleMessages();
     if (toAppend.length) {
       appendMessageRows(toAppend, { stick: true });

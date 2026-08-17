@@ -15,6 +15,13 @@ function loadTranscript(sessionDir) {
 
   const messages = [];
   let current = null;
+  /**
+   * Narzedzia po id, na CALY plik. Wczesniej tool_call_update szukalo tylko
+   * w biezacej wiadomosci, a gdy nie znalazlo — bralo ostatnie z listy.
+   * Przy rownoleglych narzedziach status "completed" ladowal na cudzym
+   * wpisie i w historii swiecily sie zle kroki.
+   */
+  const toolById = new Map();
 
   const pushUser = (text) => {
     if (!text) return;
@@ -102,10 +109,11 @@ function loadTranscript(sessionDir) {
           // raw NIE — to powodowało ściany kodu w czacie
           raw: "",
         });
+        toolById.set(a.tools[a.tools.length - 1].id, a.tools[a.tools.length - 1]);
       } else if (kind === "tool_call_update") {
         const a = pushAssistant();
         const id = u.toolCallId || u.tool_call_id;
-        const tool = a.tools.find((t) => t.id === id) || a.tools[a.tools.length - 1];
+        const tool = toolById.get(id) || null;
         if (tool) {
           if (u.status) tool.status = u.status;
           if (u.title) tool.title = u.title;

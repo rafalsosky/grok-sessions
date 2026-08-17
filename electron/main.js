@@ -578,11 +578,12 @@ async function sendHomeChat({
       id: `a-${Date.now()}`,
       role: "assistant",
       content: `Generated image (${aspectRatio || "1:1"}) for: “${prompt.slice(0, 120)}”`,
+      // BEZ b64: kilkumegabajtowy base64 ladowal w JSON-ie czatu przy kazdym
+      // wygenerowanym obrazie. Renderer i tak dociaga plik przez readPreview.
       images: [
         {
           path: saved.path,
           mimeType: saved.mimeType,
-          b64: img.b64,
         },
       ],
       createdAt: new Date().toISOString(),
