@@ -488,6 +488,43 @@ group("xai-api: reasoning_effort i delty myślenia");
     });
   });
 
+  test("Home nie zostawia sieroty po błędzie i reveal nie otwiera byle ścieżki", () => {
+    const main = fs.readFileSync(path.join(ROOT, "electron", "main.js"), "utf8");
+    const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+    assert.ok(
+      /persistFail/.test(main),
+      "błąd Home nie zapisuje asystenta na dysk"
+    );
+    assert.ok(
+      /not a session folder/.test(main),
+      "session:reveal nadal otwiera dowolną ścieżkę"
+    );
+    assert.ok(
+      /persistHomeView[\s\S]{0,400}cur\.busy/.test(app),
+      "persistHomeView zapisuje w trakcie tury"
+    );
+    assert.ok(
+      /function adoptHomeSession/.test(app),
+      "brak adopcji sid nowej sesji Home"
+    );
+    assert.ok(
+      !/function applyCodeStreamInBackground/.test(app),
+      "martwy applyCodeStreamInBackground wrócił"
+    );
+    assert.ok(
+      !/return false;\s*return false;/.test(app),
+      "podwójny martwy return w isViewingSession"
+    );
+    assert.ok(
+      /zSid && zNowej/.test(app),
+      "rekey nowej sesji nadal nadpisuje sid pustym widokiem"
+    );
+    assert.ok(
+      /awaitingOwnNewSession\(\) && busySessionIds\.size <= 1/.test(app),
+      "pierwszy chunk nowej sesji znowu leci offscreen"
+    );
+  });
+
   test("Home nie gubi thought chunków i nie pisze Writing przed pierwszym tokenem", () => {
     const main = fs.readFileSync(path.join(ROOT, "electron", "main.js"), "utf8");
     const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");

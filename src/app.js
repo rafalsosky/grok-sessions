@@ -142,6 +142,26 @@
   function rekeyNewSession(m, sid) {
     if (!sid) return null;
     const zNowej = store.get(keyOf(m, null));
+    const zSid = store.get(keyOf(m, sid));
+    // Stream zdążył wylądować na prawdziwym sid, zanim renderer dostał
+    // session-started. Nadpisanie klucza pustym „new” kasowało treść —
+    // e2e: agent napisał 165 znaków w 4 s, bańka została pusta.
+    if (zSid && zNowej && zSid !== zNowej) {
+      const have = new Set(
+        (zSid.allMessages || []).map((x) => x && x.id).filter(Boolean)
+      );
+      const extras = (zNowej.allMessages || []).filter(
+        (x) => x && x._local && x.id && !have.has(x.id)
+      );
+      if (extras.length) {
+        zSid.allMessages = extras.concat(zSid.allMessages || []);
+      }
+      if (!zSid.streamingAssistant && zNowej.streamingAssistant) {
+        zSid.streamingAssistant = zNowej.streamingAssistant;
+      }
+      store.delete(keyOf(m, null));
+      return setActive(m, sid);
+    }
     if (zNowej) {
       zNowej.sid = sid;
       zNowej.selectedId = sid;
@@ -167,8 +187,9 @@
     deleteProperty: (_t, sid) => store.delete(keyOf("grok", sid)),
   });
 
-  function ensureSessionStream(sid) {
-    return sid ? recordFor("grok", sid) : null;
+  function ensureSessionStream(sid, lane) {
+    if (!sid) return null;
+    return recordFor(lane === "home" ? "home" : "grok", sid);
   }
 
   /** Zostały po starym modelu — dziś tylko tytuł okna wraca do rekordu. */
@@ -1725,13 +1746,14 @@
    */
   function clearStreamingFlags(sid) {
     if (!sid) return;
-    const buf = streamBySession[sid];
-    if (buf) {
+    for (const lane of ["grok", "home"]) {
+      const buf = store.get(keyOf(lane, sid));
+      if (!buf) continue;
       for (const m of buf.allMessages || []) if (m) m._streaming = false;
       if (buf.streamingAssistant) buf.streamingAssistant._streaming = false;
       buf.streamingAssistant = null;
     }
-    if (isViewingSession(sid)) {
+    if (isViewingSession(sid) || isViewingHome(sid)) {
       for (const m of cur.allMessages) if (m) m._streaming = false;
       cur.streamingAssistant = null;
     }
@@ -1758,6 +1780,20 @@
     renderList();
   }
 
+  function adoptHomeSession(sid) {
+    if (!sid || mode !== "home") return;
+    if (isViewingHome(sid)) {
+      if (cur.sid !== sid) rekeyNewSession("home", sid);
+      return;
+    }
+    if (!awaitingOwnNewSession()) return;
+    rememberLocalTitle(sid);
+    rekeyNewSession("home", sid);
+    pendingNewSession = false;
+    persistNav();
+    renderList();
+  }
+
   function isViewingHome(sid) {
     if (mode !== "home" || !sid) return false;
     return (
@@ -1772,10 +1808,13 @@
     if (detachedBuild) return false;
     if (mode !== "grok") return false;
     if (cur.selectedId === sid || cur.liveSessionId === sid) return true;
+    // Jedyna nowa karta i jeden busy proces: to NASZ sid, nie zgadujemy
+    // przy dwóch turach naraz. Inaczej pierwszy chunk leci offscreen,
+    // a rekey nadpisuje go pustym widokiem.
+    if (awaitingOwnNewSession() && busySessionIds.size <= 1) return true;
     // Nowy czat: bierzemy tylko sid, którego jeszcze nie ma inna karta
     // Nowy czat NIE zglasza sie po nieznany sid — dopoki nie dostanie swojego
     // z tokenu tury, stream obcej sesji ma isc do jej wlasnego rekordu.
-    return false;
     return false;
   }
 
@@ -2190,9 +2229,9 @@
   }
 
   /** Stream do bufora sesji (UI jest na innej sesji / Home). */
-  function applyStreamOffscreen(sid, params) {
+  function applyStreamOffscreen(sid, params, lane) {
     if (!sid) return;
-    const buf = ensureSessionStream(sid);
+    const buf = ensureSessionStream(sid, lane || "grok");
     const update = params.update || params;
     const kind = update.sessionUpdate;
     if (!kind) return;
@@ -2302,10 +2341,17 @@
       return;
     }
 
-    // Home: jedna tura naraz, więc strumień z backendu należy do tego, co
-    // właśnie widać. Wcześniej lądował w buforze offscreen i Home wyglądał,
-    // jakby nic się nie działo aż do końca odpowiedzi.
-    if (mode === "home") {
+    // Home: strumień należy do sid z backendu, nie do tego, co akurat widać.
+    const homeEvent =
+      sid &&
+      (store.has(keyOf("home", sid)) ||
+        (mode === "home" && (cur.busy || awaitingOwnNewSession())));
+    if (homeEvent || (mode === "home" && cur.busy && sid)) {
+      if (sid && awaitingOwnNewSession()) adoptHomeSession(sid);
+      if (sid && !isViewingHome(sid)) {
+        applyStreamOffscreen(sid, params, "home");
+        return;
+      }
       if (!cur.busy) return;
       const update = params.update || params;
       const kind = update.sessionUpdate;
@@ -2499,71 +2545,6 @@
       "agent-work-summary" + (active.length || m._streaming ? " live" : "");
     pill.textContent = label;
     if (stick) el.chatScroll.scrollTop = el.chatScroll.scrollHeight;
-  }
-
-  /** Code stream w tle gdy UI jest na Home — nie miesza z wiadomościami Home. */
-  function applyCodeStreamInBackground(params) {
-    const update = params.update || params;
-    const kind = update.sessionUpdate;
-    if (!kind) return;
-    const b = bag("grok");
-    const ensure = () => {
-      if (b.streamingAssistant) return b.streamingAssistant;
-      b.streamingAssistant = {
-        id: `stream-${Date.now()}`,
-        role: "assistant",
-        text: "",
-        tools: [],
-        thinking: "",
-        _streaming: true,
-      };
-      b.allMessages.push(b.streamingAssistant);
-      return b.streamingAssistant;
-    };
-    if (kind === "turn_completed" || kind === "task_completed") {
-      if (b.streamingAssistant) b.streamingAssistant._streaming = false;
-      b.streamingAssistant = null;
-      return;
-    }
-    if (kind === "agent_message_chunk") {
-      const chunk = (update.content && update.content.text) || "";
-      if (isToolEchoText(chunk) || isAttachmentJunkOnly(chunk)) return;
-      const a = ensure();
-      const join =
-        typeof appendStreamChunk === "function" ? appendStreamChunk : (p, c) => p + c;
-      a.text = cleanAssistantText(join(a.text || "", chunk));
-    } else if (kind === "agent_thought_chunk") {
-      ensure().thinking += (update.content && update.content.text) || "";
-      b.statusPhase = "thinking";
-      b.statusDetail = tr("Thinking…");
-    } else if (kind === "tool_call") {
-      const a = ensure();
-      const tool = {
-        id: update.toolCallId || `t-${a.tools.length}`,
-        title: update.title || update.tool || "tool",
-        status: update.status || "pending",
-      };
-      a.tools.push(tool);
-      b.liveTools.push({ ...tool });
-      b.statusPhase = "tool";
-      b.statusDetail = humanizeToolTitle(tool.title);
-    } else if (kind === "tool_call_update") {
-      const a = ensure();
-      const id = update.toolCallId;
-      const tool =
-        a.tools.find((t) => t.id === id) || a.tools[a.tools.length - 1];
-      if (tool && update.status) tool.status = update.status;
-      if (tool && update.title) tool.title = update.title;
-      const lt =
-        b.liveTools.find((t) => t.id === id) ||
-        b.liveTools[b.liveTools.length - 1];
-      if (lt && update.status) lt.status = update.status;
-      if (lt && update.title) lt.title = update.title;
-    }
-    b.messages =
-      b.allMessages.length <= b.visibleCount
-        ? b.allMessages.slice()
-        : b.allMessages.slice(b.allMessages.length - b.visibleCount);
   }
 
   function setBusy(b, forMode) {
@@ -3028,7 +3009,7 @@
     }
     if ((cur.liveSessionId || cur.selectedId) !== sid) {
       // Widok już nie należy do tej sesji — wróć pozycję do JEJ kolejki.
-      const buf = ensureSessionStream(sid);
+      const buf = ensureSessionStream(sid, mode === "home" ? "home" : "grok");
       if (buf) {
         buf.messageQueue = buf.messageQueue || [];
         buf.messageQueue.unshift(msg);
@@ -3070,7 +3051,7 @@
     if (mode === "grok") detachedBuild = false;
     const sessionId = cur.liveSessionId || cur.selectedId || null;
     const turnMode = mode;
-    pendingNewSession = mode === "grok" && !sessionId;
+    pendingNewSession = !sessionId;
     const turnToken = `t${++turnSeq}`;
     if (pendingNewSession) {
       pendingNewEpoch = viewEpoch;
@@ -3228,7 +3209,10 @@
         : isViewingSession(doneSid));
     if (!stillViewing) {
       if (doneSid) {
-        const buf = ensureSessionStream(doneSid);
+        const buf = ensureSessionStream(
+          doneSid,
+          turnMode === "home" ? "home" : "grok"
+        );
         if (buf) {
           if (buf.streamingAssistant) buf.streamingAssistant._streaming = false;
           buf.streamingAssistant = null;
@@ -3289,8 +3273,8 @@
         turnAssistant.videos = res.assistant.videos || [];
         turnAssistant._streaming = false;
         // podmień ostatnią bańkę asystenta bez wipe
-        const lastRow = el.messages.lastElementChild;
-        if (lastRow && lastRow.classList.contains("assistant")) {
+        const lastRow = findAssistantRowFor(turnAssistant);
+        if (lastRow) {
           lastRow.replaceWith(buildMessageRow(turnAssistant));
           scrollChatToBottom(true);
         } else {
@@ -3405,6 +3389,9 @@
 
   async function persistHomeView() {
     if (mode !== "home") return;
+    if (cur.busy || (cur.streamingAssistant && cur.streamingAssistant._streaming)) {
+      return;
+    }
     const id = cur.liveSessionId || cur.selectedId;
     if (!id || typeof api.replaceHomeMessages !== "function") return;
     const messages = cur.allMessages
@@ -3864,8 +3851,11 @@
   api.onChatUpdate(handleChatUpdate);
   api.onChatBusy(({ busy: b, sessionId, mode: evMode }) => {
     if (evMode === "home") {
-      bag("home").busy = Boolean(b);
-      if (mode === "home") setBusy(Boolean(b), "home");
+      const rec = sessionId ? recordFor("home", sessionId) : bag("home");
+      rec.busy = Boolean(b);
+      if (mode === "home" && (!sessionId || isViewingHome(sessionId))) {
+        setBusy(Boolean(b), "home");
+      }
       return;
     }
     if (sessionId) setSessionBusy(sessionId, b);
@@ -3925,12 +3915,13 @@
   // Nowa sesja Build poznala sid. Token mowi, KTORA tura ja zalozyla, wiec
   // rekord "grok:new" tej tury dostaje prawdziwy klucz — bez zgadywania.
   if (typeof api.onChatSessionStarted === "function") {
-    api.onChatSessionStarted(({ sessionId, turnToken }) => {
+    api.onChatSessionStarted(({ sessionId, turnToken, mode: evMode }) => {
       if (!sessionId || !turnToken) return;
       if (turnToken !== pendingNewToken) return;
       pendingNewToken = null;
       rememberLocalTitle(sessionId);
-      adoptBuildSession(sessionId, { zTokenu: true });
+      if (evMode === "home") adoptHomeSession(sessionId);
+      else adoptBuildSession(sessionId, { zTokenu: true });
     });
   }
 
@@ -3940,8 +3931,16 @@
   api.onChatStatus(({ phase, detail, sessionId }) => {
     const sid = sessionId || null;
     if (sid && mode === "grok" && !isViewingSession(sid)) {
-      const buf = ensureSessionStream(sid);
+      const buf = ensureSessionStream(sid, "grok");
       if (buf) {
+        buf.statusPhase = phase;
+        buf.statusDetail = detail || "";
+      }
+      return;
+    }
+    if (mode === "home" && sid && !isViewingHome(sid)) {
+      if (store.has(keyOf("home", sid))) {
+        const buf = recordFor("home", sid);
         buf.statusPhase = phase;
         buf.statusDetail = detail || "";
       }

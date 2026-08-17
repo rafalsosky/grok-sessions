@@ -548,6 +548,7 @@ async function sendHomeChat({
   homeKind,
   aspectRatio,
   effort,
+  turnToken,
 }) {
   const settings = getSettings();
   const token = xai.getAccessToken(settings.grokHome || resolveGrokHome());
@@ -571,7 +572,26 @@ async function sendHomeChat({
     createdAt: new Date().toISOString(),
   };
   chat = homeChats.appendHomeMessage(userDataDir(), chat.id, userMsg);
+  send("chat:session-started", {
+    sessionId: chat.id,
+    turnToken: turnToken || null,
+    mode: "home",
+  });
 
+  const persistFail = (err) => {
+    try {
+      homeChats.appendHomeMessage(userDataDir(), chat.id, {
+        id: `a-err-${Date.now()}`,
+        role: "assistant",
+        content: String((err && err.message) || "Error"),
+        createdAt: new Date().toISOString(),
+      });
+    } catch {
+      /* nie blokuj oryginalnego błędu */
+    }
+  };
+
+  try {
   const kind = homeKind || "chat";
   const wantImage =
     kind === "image" ||
@@ -583,7 +603,7 @@ async function sendHomeChat({
     /wygeneruj wideo|generate video|zrób film/i.test(String(text || ""));
 
   if (wantVideo) {
-    status("generating_image", "Generating video…");
+    status("generating_image", "Generating video…", chat.id);
     const prompt = String(text || "")
       .replace(/^\/video\s+/i, "")
       .trim();
@@ -592,7 +612,7 @@ async function sendHomeChat({
       aspect_ratio: aspectRatio || "16:9",
       signal,
       onProgress: (p) =>
-        status("generating_image", `Generating video… ${p}%`),
+        status("generating_image", `Generating video… ${p}%`, chat.id),
     });
     // b64 NIE ląduje w wiadomości: plik ma kilka MB, a historia czatu
     // trzymana jest w JSON-ie. W UI odtwarzamy ze ścieżki.
@@ -623,7 +643,7 @@ async function sendHomeChat({
   }
 
   if (wantImage) {
-    status("generating_image", "Generating image…");
+    status("generating_image", "Generating image…", chat.id);
     const prompt = xai.stripImageCommand(text) || text;
     const img = await xai.generateImage(token, {
       prompt,
@@ -664,7 +684,7 @@ async function sendHomeChat({
     };
   }
 
-  status("thinking", "Thinking…");
+  status("thinking", "Thinking…", chat.id);
   const model = effectiveHomeModelId(settings, modelId);
   const reasoningEffort = normalizeEffort(effort || settings.effort);
 
@@ -737,7 +757,7 @@ async function sendHomeChat({
       (delta, kind) => {
         const isThink = kind === "reasoning";
         if (!isThink) {
-          if (!reply) status("responding", "Writing…");
+          if (!reply) status("responding", "Writing…", chat.id);
           reply += delta;
         }
         send("chat:update", {
@@ -795,6 +815,10 @@ async function sendHomeChat({
     title: chat.title,
     assistant: assistantMsg,
   };
+  } catch (err) {
+    persistFail(err);
+    throw err;
+  }
 }
 
 async function sendCodeChat({ text, sessionId, cwd, attachments, turnToken }) {
@@ -1044,7 +1068,9 @@ function registerIpc() {
           homeKind,
           aspectRatio,
           effort,
+          turnToken: payload && payload.turnToken,
         });
+        if (out && out.sessionId) outSid = out.sessionId;
       } else {
         if (effort) saveSettings(userDataDir(), { effort });
         out = await sendCodeChat({
@@ -1256,7 +1282,15 @@ function registerIpc() {
     if (!dirPath || !fs.existsSync(dirPath)) {
       return { ok: false, error: "Session directory does not exist" };
     }
-    shell.showItemInFolder(dirPath);
+    const settings = getSettings();
+    const root = path.resolve(
+      path.join(settings.grokHome || resolveGrokHome(), "sessions")
+    );
+    const resolved = path.resolve(dirPath);
+    if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+      return { ok: false, error: "not a session folder" };
+    }
+    shell.showItemInFolder(resolved);
     return { ok: true };
   });
 
