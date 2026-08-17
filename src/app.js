@@ -488,7 +488,7 @@
     const work = currentWorkStatus();
     const countLabel = work && work.headline
       ? work.headline
-      : `${tr("Steps")} (${liveTools.length})`;
+      : `${tr("Steps")} (${cur.liveTools.length})`;
     el.btnToggleActivity.classList.toggle(
       "hidden",
       cur.liveTools.length === 0 && cur.livePlan.length === 0
@@ -1345,7 +1345,7 @@
       const more = document.createElement("button");
       more.type = "button";
       more.className = "load-more";
-      more.textContent = `Load earlier (${allMessages.length - widoczne.length})`;
+      more.textContent = `Load earlier (${cur.allMessages.length - cur.widoczne.length})`;
       more.onclick = () => {
         const box2 = el.chatScroll;
         const oldH = box2 ? box2.scrollHeight : 0;
@@ -2538,7 +2538,7 @@
     }
     if (cur.messageQueue.length) {
       chip.classList.remove("hidden");
-      chip.textContent = `${tr("Queue")}: ${messageQueue.length}`;
+      chip.textContent = `${tr("Queue")}: ${cur.messageQueue.length}`;
       chip.title = tr("Send queued messages now");
       chip.style.cursor = "pointer";
       chip.onclick = () => injectOldestQueued();
@@ -2766,7 +2766,7 @@
       nowaWStarcie
     ) {
       const piece = text || tr("(attachment)");
-      const qid = `u-q-${Date.now()}-${messageQueue.length}`;
+      const qid = `u-q-${Date.now()}-${cur.messageQueue.length}`;
       cur.messageQueue.push({ id: qid, text: piece, attachments: atts });
       pushAll({
         id: qid,
@@ -2787,7 +2787,7 @@
         "queued",
         tr("Queued — press Send now above the composer, or wait")
       );
-      showToast(`${tr("Queue")} (${messageQueue.length})`, "ok");
+      showToast(`${tr("Queue")} (${cur.messageQueue.length})`, "ok");
       el.input.focus();
       return;
     }
@@ -2843,7 +2843,7 @@
     head.className = "queue-dock-head";
     const title = document.createElement("span");
     title.className = "queue-dock-title";
-    title.textContent = `${tr("Waiting to send")} · ${messageQueue.length}`;
+    title.textContent = `${tr("Waiting to send")} · ${cur.messageQueue.length}`;
     const sendAll = document.createElement("button");
     sendAll.type = "button";
     sendAll.className = "queued-inject";

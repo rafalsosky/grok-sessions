@@ -11,7 +11,8 @@
     "verify-sessions": "node scripts/verify-sessions.js",
     "smoke": "node scripts/e2e-smoke.js",
     "make-app": "bash scripts/make-app.sh",
-    "test": "node scripts/test-units.js"
+    "test": "node scripts/test-units.js",
+    "e2e": "node scripts/e2e-ui.js"
   },
   "engines": {
     "node": ">=18"

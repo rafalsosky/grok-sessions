@@ -1135,6 +1135,26 @@ group("stan sesji: jedna mapa, zero recznej synchronizacji");
     assert.ok(/"use strict";/.test(glowa), "app.js nie jest w trybie scislym");
   });
 
+  test("stan sesji nie jest czytany z pominieciem cur. — takze w szablonach", () => {
+    // Tokenizer, ktorym robilem podmiane, traktowal `...` jako nieprzezroczysty
+    // tekst, wiec ${messageQueue.length} w szablonie NIE zostalo podmienione.
+    // W trybie scislym to ReferenceError w trakcie pisania — kolejka przepadala.
+    const pola = [
+      "allMessages", "widoczne", "streamingAssistant", "liveTools", "livePlan",
+      "attachments", "messageQueue", "visibleCount", "showActivity",
+      "selectedId", "liveSessionId",
+    ];
+    const zle = [];
+    for (const n of pola) {
+      const re = new RegExp("\\$\\{\\s*" + n + "\\b", "g");
+      let m;
+      while ((m = re.exec(app))) {
+        zle.push(n + " w linii " + app.slice(0, m.index).split("\n").length);
+      }
+    }
+    assert.deepStrictEqual(zle, [], "gole odwolanie w szablonie: " + zle.join(", "));
+  });
+
   test("stan sesji nigdy nie jest przypisywany z pominieciem cur.", () => {
     const kod = app
       .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))

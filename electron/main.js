@@ -1278,6 +1278,16 @@ try {
 }
 
 // Jedna instancja: drugie kliknięcie = fokus, nie drugi zombie + „Wymuś zakończenie”
+// Furtka dla testu E2E: wlasna nazwa i wlasny katalog danych, wiec harness
+// odpala SWOJA instancje obok tej, ktorej uzywa czlowiek. Bez tego blokada
+// pojedynczej instancji (po NAZWIE aplikacji, nie po katalogu) konczyla kazdy
+// automatyczny test natychmiastowym app.exit(0) — i dlatego przez caly dzien
+// weryfikowalem poprawki wyrywkowo zamiast od zera.
+if (process.env.GROK_SESSIONS_E2E) {
+  app.setName("SuperGrok E2E");
+  app.setPath("userData", process.env.GROK_SESSIONS_E2E);
+}
+
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.exit(0);
