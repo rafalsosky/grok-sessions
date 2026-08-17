@@ -931,7 +931,12 @@ group("repo: bez zaszytych ścieżek i danych osobowych");
       }
       const full = path.join(dir, e.name);
       if (e.isDirectory()) walk(full);
-      else if (/\.(js|css|html|json|md)$/.test(e.name) && e.name !== "package-lock.json") {
+      // .sh i .py tez — README obiecuje, ze repo jest czyste, a skrypty
+      // buildujace i narzedzia byly poza skanem.
+      else if (
+        /\.(js|css|html|json|md|sh|py)$/.test(e.name) &&
+        e.name !== "package-lock.json"
+      ) {
         files.push(full);
       }
     }
@@ -1043,12 +1048,22 @@ group("agent-pool: sesje jak karty terminala");
       "chat:send nie sprawdza busy per sesja"
     );
   });
-  test("chat:open nie ładuje sesji na wspólnym procesie", () => {
-    const block = main.match(/ipcMain\.handle\("chat:open"[\s\S]*?\n  \}\);/);
-    assert.ok(block, "brak chat:open");
+  // chat:new i chat:open byly martwe — renderer ich nie wolal, a testy
+  // pilnowaly ich zachowania i dawaly falszywe poczucie pokrycia. Usuniete.
+  test("otwarcie sesji nie robi session/load na cudzym procesie", () => {
     assert.ok(
-      !/ensureSession/.test(block[0]),
-      "otwarcie B nadal robi session/load na agencie A"
+      !/ipcMain\.handle\("chat:open"/.test(main),
+      "martwy handler chat:open wrocil"
+    );
+    const block = main.match(/async function sendCodeChat[\s\S]*?\n\}/);
+    assert.ok(block, "brak sendCodeChat");
+    assert.ok(
+      /if \(sid && pool\.has\(sid\)\)/.test(block[0]),
+      "sesja nie bierze WLASNEGO klienta z puli"
+    );
+    assert.ok(
+      /client = await spawnClient\(\)/.test(block[0]),
+      "brak osobnego procesu dla nowej sesji"
     );
   });
   test("chat:stop wymaga sessionId i nie zabija puli", () => {
@@ -1279,15 +1294,137 @@ group("renderer: pliki nie kasuja sie nawzajem we wspolnym zakresie");
       assert.ok(files.includes(need), "brak " + need);
     }
   });
-  test("sklejone skrypty kompiluja sie jak w oknie (zero kolizji const)", () => {
-    const src = files
-      .map((f) => fs.readFileSync(path.join(ROOT, "src", f), "utf8"))
-      .join("\n;\n");
-    assert.doesNotThrow(
-      () => new vm.Script(src, { filename: "renderer-bundle.js" }),
-      "kolizja nazw miedzy plikami — w oknie ktorys modul sie nie zaladuje"
+  // Kompilacja NIE WYSTARCZA: modul moze sie wywalic dopiero przy wykonaniu.
+  // Ten test naprawde URUCHAMIA bundle w kontekscie z atrapa window/document
+  // i sprawdza, ze kazdy modul rzeczywiscie wystawil sie na window.
+  function uruchomBundle(pliki) {
+    const okno = {};
+    const noop = () => {};
+    const el = () => ({
+      classList: { add: noop, remove: noop, toggle: noop, contains: () => false },
+      style: {}, dataset: {}, appendChild: noop, remove: noop,
+      addEventListener: noop, removeEventListener: noop,
+      querySelector: () => null, querySelectorAll: () => [],
+      setAttribute: noop, focus: noop, textContent: "", innerHTML: "",
+    });
+    const sandbox = {
+      window: okno,
+      document: {
+        documentElement: el(),
+        body: el(),
+        createElement: el,
+        getElementById: () => null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener: noop,
+      },
+      navigator: { language: "pl" },
+      console,
+      requestAnimationFrame: noop,
+      cancelAnimationFrame: noop,
+      setTimeout,
+      clearTimeout,
+      setInterval,
+      clearInterval,
+      ResizeObserver: function () {
+        return { observe: noop, disconnect: noop };
+      },
+    };
+    sandbox.globalThis = sandbox;
+    sandbox.self = sandbox;
+    const ctx = vm.createContext(sandbox);
+    for (const f of pliki) {
+      const kod = fs.readFileSync(path.join(ROOT, "src", f), "utf8");
+      new vm.Script(kod, { filename: f }).runInContext(ctx);
+    }
+    return okno;
+  }
+
+  test("bundle renderera naprawde SIE URUCHAMIA, nie tylko kompiluje", () => {
+    // app.js wymaga pelnego DOM-u i sam wychodzi bez preloada — bierzemy
+    // wszystko przed nim, bo to tam siedzialy kolizje.
+    const moduly = files.filter((f) => f !== "app.js");
+    let okno;
+    assert.doesNotThrow(() => {
+      okno = uruchomBundle(moduly);
+    }, "modul wywala sie przy ladowaniu we wspolnym zakresie");
+    for (const [f, name] of [
+      ["chat-scroll.js", "chatScroll"],
+      ["chat-history.js", "chatHistory"],
+      ["work-summary.js", "workSummary"],
+      ["markdown.js", "renderMarkdown"],
+    ]) {
+      assert.ok(
+        okno[name],
+        `window.${name} nie istnieje po zaladowaniu ${f} — app.js zejdzie na zaslepki`
+      );
+    }
+    assert.strictEqual(typeof okno.chatScroll.createChatScroll, "function");
+    assert.strictEqual(typeof okno.chatHistory.loadSessionView, "function");
+  });
+  // [32] Kontrakt main -> preload -> app.js. `chat:agent-exit` byl wysylany
+  // przez main i NIKT go nie sluchal: sesja zostawala w UI jako pracujaca.
+  test("kazdy kanal wysylany przez main ma most w preload", () => {
+    const main = fs.readFileSync(path.join(ROOT, "electron", "main.js"), "utf8");
+    const pre = fs.readFileSync(path.join(ROOT, "electron", "preload.js"), "utf8");
+    const wysylane = new Set(
+      [...main.matchAll(/send\("([\w:.-]+)"/g)].map((m) => m[1])
+    );
+    const mostkowane = new Set(
+      [...pre.matchAll(/ipcRenderer\.on\("([\w:.-]+)"/g)].map((m) => m[1])
+    );
+    const gluche = [...wysylane].filter((k) => !mostkowane.has(k));
+    assert.deepStrictEqual(gluche, [], "kanaly leca w prozne: " + gluche.join(", "));
+  });
+
+  test("kazdy most w preload ma sluchacza w app.js", () => {
+    const pre = fs.readFileSync(path.join(ROOT, "electron", "preload.js"), "utf8");
+    const app = fs.readFileSync(path.join(ROOT, "src", "app.js"), "utf8");
+    const mosty = [...pre.matchAll(/^\s{2}(on[A-Z]\w+):/gm)].map((m) => m[1]);
+    const bezsluchacza = mosty.filter(
+      (n) => !new RegExp("api\\." + n + "\\b").test(app)
+    );
+    assert.deepStrictEqual(
+      bezsluchacza,
+      [],
+      "mosty bez sluchacza w rendererze: " + bezsluchacza.join(", ")
     );
   });
+
+  test("kazde ipcMain.handle jest wolane przez preload", () => {
+    const main = fs.readFileSync(path.join(ROOT, "electron", "main.js"), "utf8");
+    const pre = fs.readFileSync(path.join(ROOT, "electron", "preload.js"), "utf8");
+    const handlery = [...main.matchAll(/ipcMain\.handle\("([\w:.-]+)"/g)].map((m) => m[1]);
+    const wolane = new Set(
+      [...pre.matchAll(/ipcRenderer\.invoke\("([\w:.-]+)"/g)].map((m) => m[1])
+    );
+    const martwe = handlery.filter((k) => !wolane.has(k));
+    assert.deepStrictEqual(martwe, [], "martwe handlery IPC: " + martwe.join(", "));
+  });
+
+  // [35] Klucz "sid#id" — dwa procesy grok numeruja wlasne zadania od 1.
+  test("zgoda na narzedzie jest kluczowana per sesja, nie samym id", () => {
+    const main = fs.readFileSync(path.join(ROOT, "electron", "main.js"), "utf8");
+    assert.ok(
+      /pendingPermissions\.set\(key,/.test(main),
+      "klucz uprawnienia nadal to samo goe id — kolizja miedzy sesjami"
+    );
+    assert.ok(
+      /\$\{sid \|\| "\?"\}#\$\{id\}/.test(main),
+      "brak zlozonego klucza sid#id"
+    );
+    assert.ok(
+      /entry\.client\.respondPermission\(entry\.rawId/.test(main),
+      "odpowiedz nie idzie do klienta, ktory o nia prosil"
+    );
+    assert.ok(
+      !/pool\.all\(\)\[0\]/.test(
+        main.slice(main.indexOf('ipcMain.handle("chat:permission-reply"'), main.indexOf('ipcMain.handle("chat:permission-reply"') + 600)
+      ),
+      "zostal fallback na pierwszego klienta z brzegu"
+    );
+  });
+
   test("moduly wystawiaja sie na window pod wlasna nazwa", () => {
     for (const [f, name] of [
       ["chat-scroll.js", "chatScroll"],

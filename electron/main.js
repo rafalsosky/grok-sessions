@@ -899,36 +899,6 @@ function registerIpc() {
     return loadTranscript(dirPath);
   });
 
-  ipcMain.handle("chat:new", async (_e, payload) => {
-    const mode = (payload && payload.mode) || "home";
-    if (mode === "home") {
-      const chat = homeChats.createHomeChat(userDataDir());
-      pushSessions();
-      return { ok: true, sessionId: chat.id, mode: "home", title: chat.title };
-    }
-    // Code: lazy — no agent yet
-    return { ok: true, sessionId: null, mode: "grok", lazy: true };
-  });
-
-  ipcMain.handle("chat:open", async (_e, payload) => {
-    const { id, cwd, mode } = payload || {};
-    if (mode === "home") {
-      const chat = homeChats.loadHomeChat(userDataDir(), id);
-      if (!chat) return { ok: false, error: "Not found" };
-      return { ok: true, sessionId: id, mode: "home", title: chat.title };
-    }
-    if (!UUID_RE.test(id || "")) {
-      return { ok: false, error: "Bad session id" };
-    }
-    // Otwarcie karty NIE ładuje sesji na procesie innej karty.
-    return {
-      ok: true,
-      sessionId: id,
-      mode: "grok",
-      attached: pool.has(id),
-    };
-  });
-
   ipcMain.handle("chat:send", async (_e, payload) => {
     const {
       text,

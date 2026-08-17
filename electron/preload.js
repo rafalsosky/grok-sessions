@@ -15,8 +15,6 @@ contextBridge.exposeInMainWorld("grokSessions", {
   replaceHomeMessages: (payload) =>
     ipcRenderer.invoke("home:replace-messages", payload),
   transcript: (payload) => ipcRenderer.invoke("session:transcript", payload),
-  chatNew: (payload) => ipcRenderer.invoke("chat:new", payload),
-  chatOpen: (payload) => ipcRenderer.invoke("chat:open", payload),
   chatSend: (payload) => ipcRenderer.invoke("chat:send", payload),
   chatSetModel: (payload) => ipcRenderer.invoke("chat:set-model", payload),
   chatSetEffort: (effort) => ipcRenderer.invoke("chat:set-effort", effort),
@@ -61,6 +59,12 @@ contextBridge.exposeInMainWorld("grokSessions", {
     const handler = (_e, data) => cb(data);
     ipcRenderer.on("chat:status", handler);
     return () => ipcRenderer.removeListener("chat:status", handler);
+  },
+  /** Proces agenta padl (crash / brak binarki). Bez tego kanal szedl w prozne. */
+  onChatAgentExit: (cb) => {
+    const handler = (_e, data) => cb(data);
+    ipcRenderer.on("chat:agent-exit", handler);
+    return () => ipcRenderer.removeListener("chat:agent-exit", handler);
   },
   onChatPermission: (cb) => {
     const handler = (_e, data) => cb(data);

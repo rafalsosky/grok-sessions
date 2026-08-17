@@ -163,10 +163,34 @@ npm run smoke             # test ACP od końca do końca (wymaga zalogowania)
 ```text
 grok-sessions/
   electron/     # proces główny, ACP, API xAI, sesje, ustawienia
-  src/          # UI (index.html, app.js, markdown.js, styles.css)
+    main.js         # IPC, pula agentów, watchery, cykl życia okna
+    agent-pool.js   # jeden proces `grok` na jedną sesję Build
+    acp-client.js   # klient ACP po stdio
+    sessions.js     # skan ~/.grok/sessions, tytuły sesji
+    transcript.js   # historia z updates.jsonl
+  src/          # UI — ładowane zwykłymi <script>, WSPÓLNY zakres globalny
+    i18n.js         # 1. słownik PL (baza jest angielska)
+    markdown.js     # 2. markdown → HTML
+    work-summary.js # 3. „Read 7 files, ran 5 commands”
+    chat-history.js # 4. merge transkryptu z żywymi bańkami
+    chat-scroll.js  # 5. trzymanie dołu tylko gdy user jest przy dole
+    app.js          # 6. cały renderer
   assets/       # ikony
   scripts/      # testy, weryfikacja, budowanie .app
 ```
+
+Kolejność ładowania z `index.html` jest nośna, a wszystkie moduły w `src/`
+dzielą **jeden** globalny zakres. Dlatego każdy jest owinięty w IIFE: bez tego
+`const api` z drugiego pliku wywala go w całości (`Identifier 'api' has already
+been declared`) i moduł po prostu nie istnieje w oknie, a `app.js` cicho
+schodzi na zaślepki. Testy w Node tego nie widzą — każdy plik ma tam własny
+zakres modułu — więc `npm test` uruchamia bundle w kontekście z atrapą `window`.
+
+### Język interfejsu
+
+Baza jest angielska, polski siedzi w `src/i18n.js`. Przełącznik jest
+w Ustawieniach (`Language`). Nie wstawiaj polskich literałów do `app.js` —
+`npm test` to blokuje.
 
 ---
 
@@ -215,6 +239,8 @@ README, a poprawki do tych czterech punktów przyjmę jako PR.
 | „Not signed in” mimo logowania | sprawdź `~/.grok/auth.json`; jeśli go nie ma, `grok login` się nie dokończyło |
 | Aplikacja nie startuje po `npm start` | `node -v` musi być 18+; usuń `node_modules` i `npm install` od nowa |
 | macOS blokuje `.app` | prawy przycisk → Otwórz (aplikacja nie jest podpisana) |
+| `.app` alarmuje, że nie ma Electrona, choć jest | launcher zna ścieżkę z chwili budowania. Projekt przeniesiony → `npm run make-app` od nowa |
+| Zmiana modelu/efortu nic nie robi | sesja jest w trakcie tury — restart procesu agenta jest wtedy niemożliwy, apka mówi to wprost |
 | Tygodniowy % pusty | tak ma być, dopóki nie włączysz czytania ciasteczek (patrz „Bezpieczeństwo”) |
 
 Logi aplikacji: `$TMPDIR/supergrok-desktop.log` przy starcie z `.app`,

@@ -61,8 +61,15 @@ APP_DIR="$PROJECT_DIR"
 ELECTRON_BIN="\$APP_DIR/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 LOG="\${TMPDIR:-/tmp}/supergrok-desktop.log"
 
+# Launcher zna sciezke z chwili budowania. Po przeniesieniu projektu alert
+# kazal robic npm install w katalogu, ktorego juz nie ma — mow, co naprawde jest.
+if [[ ! -d "\$APP_DIR" ]]; then
+  osascript -e 'display alert "$APP_NAME" message "Projekt nie lezy juz w $PROJECT_DIR. Przenies go z powrotem albo zbuduj launcher od nowa: npm run make-app" as critical'
+  exit 1
+fi
+
 if [[ ! -x "\$ELECTRON_BIN" ]]; then
-  osascript -e 'display alert "$APP_NAME" message "Brak Electrona w projekcie. Uruchom: npm install w katalogu projektu." as critical'
+  osascript -e 'display alert "$APP_NAME" message "Brak Electrona w projekcie. Uruchom: npm install w $PROJECT_DIR" as critical'
   exit 1
 fi
 

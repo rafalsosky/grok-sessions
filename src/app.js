@@ -3822,6 +3822,25 @@
     showToast(msg.slice(0, 200), "error");
     setStatus("error", msg.slice(0, 120), mode, { sessionId: sid });
   });
+  // Proces agenta padl. Wczesniej main wysylal to w prozne: sesja zostawala
+  // w UI jako pracujaca, ze Stopem, ktory juz nie mial czego zatrzymac.
+  if (typeof api.onChatAgentExit === "function") {
+    api.onChatAgentExit(({ code, sessionId }) => {
+      if (sessionId) {
+        setSessionBusy(sessionId, false);
+        clearStreamingFlags(sessionId);
+      }
+      if (mode === "grok" && (!sessionId || isViewingSession(sessionId))) {
+        setBusy(false, "grok");
+        el.statusBar.classList.add("hidden");
+        if (code !== 0) {
+          showToast(tr("Agent process stopped — send again to restart"), "error");
+        }
+      }
+      renderList();
+    });
+  }
+
   api.onChatModels(() => {
     if (mode === "grok") refresh();
   });
