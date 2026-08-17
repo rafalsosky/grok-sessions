@@ -1027,12 +1027,15 @@ function registerIpc() {
     saveSettings(userDataDir(), { effort: level });
     const sid =
       typeof payload === "object" && payload ? payload.sessionId : null;
+    // Zmiana efortu restartuje proces agenta, wiec w srodku tury sie nie da.
+    // Wczesniej handler i tak oddawal {ok:true} i UI meldował sukces.
+    if (sid && pool.isBusy(sid)) {
+      return { ok: false, error: "This session is still working", effort: level };
+    }
     try {
       const client = sid ? pool.get(sid) : null;
-      if (client && !pool.isBusy(sid)) {
-        await client.setEffort(level, { cwd });
-      }
-      return { ok: true, effort: level };
+      if (client) await client.setEffort(level, { cwd });
+      return { ok: true, effort: level, applied: Boolean(client) };
     } catch (err) {
       return { ok: false, error: err.message };
     }
@@ -1324,8 +1327,13 @@ if (!gotLock) {
     refreshHomeModels().catch(() => {});
 
     app.on("activate", () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
-      else if (mainWindow && !mainWindow.isDestroyed()) {
+      if (BrowserWindow.getAllWindows().length === 0) {
+        createWindow();
+        // window-all-closed zdjelo watchery i pollTimer. Bez tego lista sesji
+        // po powrocie z Docka stala martwa az do restartu apki.
+        startWatchers();
+        setTimeout(pushSessions, 200);
+      } else if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.show();
         mainWindow.focus();
       }
@@ -1333,13 +1341,24 @@ if (!gotLock) {
   });
 }
 
-app.on("window-all-closed", async () => {
+app.on("window-all-closed", () => {
   clearWatchers();
-  await pool.stopAll();
-  if (process.platform !== "darwin") app.quit();
+  // macOS: zamkniecie okna to NIE wyjscie z aplikacji. Wczesniej Cmd+W
+  // w srodku tury SIGTERM-owalo wszystkie procesy grok. Sprzatanie nalezy
+  // do before-quit.
+  if (process.platform !== "darwin") {
+    pool.stopAll().finally(() => app.quit());
+  }
 });
 
-app.on("before-quit", async () => {
+// Electron ignoruje Promise zwrocony z handlera, wiec `async` konczylo sie
+// dla niego na pierwszym awaicie i awaryjny SIGKILL po 3 s nie mial kiedy
+// zadzialac. Blokujemy wyjscie i wychodzimy sami, gdy pula jest posprzatana.
+let quitting = false;
+app.on("before-quit", (e) => {
+  if (quitting) return;
+  e.preventDefault();
+  quitting = true;
   clearWatchers();
-  await pool.stopAll();
+  pool.stopAll().finally(() => app.exit(0));
 });

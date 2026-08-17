@@ -3509,6 +3509,9 @@
     const res = await api.chatSetEffort({
       effort: effortLevel,
       cwd: selectedRow()?.cwd || defaultCwd,
+      // Bez sessionId handler w main nie mial na czym zadzialac i cicho
+      // konczyl {ok:true} — dropdown meldował sukces, agent nic nie wiedzial.
+      sessionId: liveSessionId || selectedId,
     });
     if (!res.ok) showToast(res.error || tr("Effort change failed"), "error");
     else showToast(`Effort: ${effortLevel}`, "ok");

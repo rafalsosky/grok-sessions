@@ -96,11 +96,20 @@ class AcpClient extends EventEmitter {
     // WAŻNE: nie deklaruj fs/terminal capabilities, jeśli ich nie implementujemy.
     // Agent wtedy wisi na reverse-RPC (fs/read_text_file itd.) i czat „nie działa”.
     // Puste capabilities → narzędzia lecą po stronie procesu grok (jak headless).
-    const init = await this.request("initialize", {
-      protocolVersion: 1,
-      clientInfo: { name: "grok-sessions", version: "0.2.1" },
-      clientCapabilities: {},
-    });
+    let init;
+    try {
+      init = await this.request("initialize", {
+        protocolVersion: 1,
+        clientInfo: { name: "grok-sessions", version: "0.2.1" },
+        clientCapabilities: {},
+      });
+    } catch (err) {
+      // Zawieszony albo stary `grok` nie odpowiada na initialize. Bez tego
+      // zabicia zostawal ZYWY proces, do ktorego nikt juz nie mial referencji
+      // — i tak przy kazdej probie startu.
+      await this.stop();
+      throw err;
+    }
 
     const meta = init._meta || {};
     const modelState = meta.modelState || {};
@@ -313,15 +322,30 @@ class AcpClient extends EventEmitter {
     const prompt = Array.isArray(textOrBlocks)
       ? textOrBlocks
       : [{ type: "text", text: String(textOrBlocks) }];
-    const result = await this.request(
-      "session/prompt",
-      {
-        sessionId: sid,
-        prompt,
-      },
-      { timeoutMs: 600000 }
-    );
-    return result;
+    try {
+      return await this.request(
+        "session/prompt",
+        { sessionId: sid, prompt },
+        { timeoutMs: 600000 }
+      );
+    } catch (err) {
+      // Timeout po naszej stronie nie zatrzymywal agenta: proces dalej mielil
+      // i sypal session/update do martwej tury. Powiedz mu wprost, ze koniec.
+      try {
+        if (this.proc && this.proc.stdin.writable) {
+          this.proc.stdin.write(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              method: "session/cancel",
+              params: { sessionId: sid },
+            }) + "\n"
+          );
+        }
+      } catch {
+        /* proces juz martwy */
+      }
+      throw err;
+    }
   }
 
   async setEffort(level, { cwd } = {}) {
@@ -347,6 +371,10 @@ class AcpClient extends EventEmitter {
 
   async setModel(modelId) {
     this.model = modelId;
+    // Bez zywej sesji nie ma czego przestawiac: proces i tak startuje
+    // z `--model`. Wczesniej auto-podmiana na najnowszy model restartowala
+    // proces W SRODKU ensureSession/prompt i gubila sesje.
+    if (!this.sessionId) return { ok: true, method: "deferred" };
     // Many agents need restart to change default model for new sessions.
     // Try extension methods first; if none, restart process.
     try {
@@ -369,9 +397,18 @@ class AcpClient extends EventEmitter {
     } catch {
       /* restart */
     }
+    const sid = this.sessionId;
+    const workCwd = this.cwd;
     await this.stop();
     this.model = modelId;
     await this.start();
+    if (sid) {
+      try {
+        await this.ensureSession({ sessionId: sid, cwd: workCwd });
+      } catch {
+        /* nowa sesja, gdy load nie wyjdzie */
+      }
+    }
     return { ok: true, method: "restart" };
   }
 
@@ -385,6 +422,11 @@ class AcpClient extends EventEmitter {
     if (this.proc) {
       const p = this.proc;
       this.proc = null;
+      // Celowe zabicie procesu NIE jest smiercia agenta. Handler 'exit'
+      // z _doStart wyrzucal sesje z puli i zostawial sierote po restarcie
+      // (zmiana modelu / efortu / trybu uprawnien). stop() robi to samo
+      // sam — ready=false, sessionId=null, odrzucenie pending.
+      p.removeAllListeners("exit");
       try {
         p.kill("SIGTERM");
       } catch {
