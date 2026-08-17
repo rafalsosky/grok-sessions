@@ -46,7 +46,12 @@ const pool = createAgentPool();
 const promptBusy = { home: false };
 /** Przerwanie żądania Home (Stop działa też poza trybem Build). */
 let homeAbort = null;
-/** Oczekujące prośby agenta o zgodę na narzędzie: id → sessionId */
+/**
+ * Oczekujące prośby o zgodę na narzędzie: klucz "sid#id" → { client, rawId }.
+ * Samo `id` nie wystarczy: każdy proces grok numeruje własne żądania od 1,
+ * więc przy dwóch sesjach Build id=1 z sesji B nadpisywało id=1 z sesji A
+ * i odpowiedź szła do złego procesu.
+ */
 const pendingPermissions = new Map();
 /** Żywa lista Home z api.x.ai; zanim przyjdzie odpowiedź — fallback. */
 let homeModelsLive = modelsLib.FALLBACK_HOME_MODELS.slice();
@@ -373,9 +378,10 @@ function wireClient(client) {
       (params && (params.sessionId || params.session_id)) ||
       client.sessionId ||
       pool.findByClient(client);
-    pendingPermissions.set(id, sid);
+    const key = `${sid || "?"}#${id}`;
+    pendingPermissions.set(key, { client, rawId: id });
     send("chat:permission", {
-      id,
+      id: key,
       sessionId: sid,
       toolCall: (params && params.toolCall) || null,
       options: (params && params.options) || [],
@@ -999,10 +1005,9 @@ function registerIpc() {
   ipcMain.handle("chat:permission-reply", async (_e, payload) => {
     const { id, optionId } = payload || {};
     if (id == null) return { ok: false, error: "No agent" };
-    const sid = pendingPermissions.get(id);
-    const client = (sid && pool.get(sid)) || pool.all()[0];
-    if (!client) return { ok: false, error: "No agent" };
-    const ok = client.respondPermission(id, optionId || null);
+    const entry = pendingPermissions.get(id);
+    if (!entry) return { ok: false, error: "Permission request expired" };
+    const ok = entry.client.respondPermission(entry.rawId, optionId || null);
     pendingPermissions.delete(id);
     return { ok };
   });

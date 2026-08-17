@@ -1621,6 +1621,9 @@
 
     selectedId = row.id;
     liveSessionId = row.id;
+    // Kliknięcie w istniejącą kartę kończy stan „czekam na sid nowego czatu”.
+    // Zawieszona flaga pozwalała później przygarnąć cudzy sid.
+    pendingNewSession = false;
     el.wsTitle.textContent = row.title;
     bag().wsTitle = row.title;
     updatePathChips(row.cwd);
@@ -2101,8 +2104,11 @@
     const sid = (params && params.sessionId) || null;
     if (sid && mode === "grok") adoptBuildSession(sid);
     if (!sid) {
-      // nieoznaczony stream — tylko do offscreen busySession jeśli znamy
-      if (busySessionId) applyStreamOffscreen(busySessionId, params);
+      // Nieoznaczony stream. Zgadywanie „pierwsza busy z brzegu” przy DWÓCH
+      // pracujących sesjach wlewa tekst w losową z nich — wtedy wolę zgubić
+      // chunk niż zabrudzić cudzy czat.
+      const busyNow = Array.from(busySessionIds);
+      if (busyNow.length === 1) applyStreamOffscreen(busyNow[0], params);
       return;
     }
 

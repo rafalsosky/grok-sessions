@@ -73,8 +73,11 @@ function normalizeMarkdown(src) {
   // HR
   t = t.replace(/([^\n|-])\s*(---)\s*([^\n|-])/g, "$1\n\n$2\n\n$3");
 
-  // Bold section labels after sentence
-  t = t.replace(/([.!?])\s*(\*\*[^*\n]{2,50}\*\*)/g, "$1\n\n$2");
+  // Etykieta **Tak.** dostaje własny akapit TYLKO gdy model sam ją oddzielił
+  // (jest już po nowej linii). Wcześniej każde pogrubienie w środku zdania
+  // wylatywało do osobnego bloku i robiło się z niego nagłówek — stąd
+  // „pogrubiony tekst nie wiadomo skąd” i dziury między zdaniami.
+  t = t.replace(/([.!?])[ \t]*\n[ \t]*(\*\*[^*\n]{2,50}\*\*)/g, "$1\n\n$2");
 
   // Numbered steps "1. Foo 2. Bar" and glued "resetować.1. SuperGrok"
   t = t.replace(/(\S)\s+(\d+\.\s+[A-ZĄĆĘŁŃÓŚŹŻ])/g, "$1\n$2");
